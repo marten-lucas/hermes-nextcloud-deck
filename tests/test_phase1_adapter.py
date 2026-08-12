@@ -47,6 +47,24 @@ class FakeSession:
                 return FakeResponse(payload, status=status)
         raise AssertionError(f"Unexpected URL requested: {url}")
 
+    def post(self, url, *, json=None, headers=None):
+        self.calls.append({"method": "POST", "url": url, "json": json, "headers": headers})
+        for suffix, route in self.routes.items():
+            if url.endswith(suffix):
+                status = route.get("status", 200)
+                payload = route.get("payload")
+                return FakeResponse(payload, status=status)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    def put(self, url, *, json=None, headers=None):
+        self.calls.append({"method": "PUT", "url": url, "json": json, "headers": headers})
+        for suffix, route in self.routes.items():
+            if url.endswith(suffix):
+                status = route.get("status", 200)
+                payload = route.get("payload")
+                return FakeResponse(payload, status=status)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
     async def close(self):
         self.closed = True
 
@@ -97,14 +115,6 @@ class Phase1AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(adapter._polling_task)
         await adapter.disconnect()
         self.assertTrue(fake_session.closed)
-
-    async def test_send_reports_phase1_not_implemented(self):
-        adapter = MODULE.NextcloudDeckPlatform(self.config)
-
-        result = await adapter.send("card-1", "hello")
-
-        self.assertFalse(result.success)
-        self.assertIn("phase 1", result.error.lower())
 
     async def test_poll_once_ingests_assigned_cards_for_configured_boards(self):
         config = SimpleNamespace(
@@ -215,6 +225,110 @@ class Phase1AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(first))
         self.assertEqual(0, len(second))
         self.assertEqual(1, len(captured))
+
+    async def test_send_posts_comment_for_known_work_item(self):
+        adapter = MODULE.NextcloudDeckPlatform(self.config)
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "",
+            "due_date": None,
+        }
+        adapter._session = FakeSession(
+            {
+                "cards/701/comments": {
+                    "payload": {
+                        "ocs": {
+                            "data": {
+                                "id": "901",
+                                "message": "Done",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        result = await adapter.send("deck:board:7:card:701", "Done")
+
+        self.assertTrue(result.success)
+        self.assertEqual("901", result.message_id)
+
+    async def test_move_card_to_status_uses_board_mapping(self):
+        config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes-user",
+                "boards": [
+                    {
+                        "board_id": "7",
+                        "stack_mapping": {"done": "Erledigt"},
+                    }
+                ],
+            },
+            token="",
+        )
+        adapter = MODULE.NextcloudDeckPlatform(config)
+        adapter._board_stack_index["7"] = {
+            "backlog": {"id": "70", "title": "Backlog"},
+            "erledigt": {"id": "71", "title": "Erledigt"},
+        }
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "",
+            "due_date": None,
+        }
+        adapter._session = FakeSession(
+            {
+                "boards/7/stacks/70/cards/701/reorder": {"payload": {}},
+            }
+        )
+
+        await adapter.move_card_to_status("deck:board:7:card:701", "done")
+
+        self.assertEqual("71", adapter._work_item_index["deck:board:7:card:701"]["stack_id"])
+
+    async def test_update_card_checklist_preserves_non_checklist_text(self):
+        adapter = MODULE.NextcloudDeckPlatform(self.config)
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "Intro\n- [ ] write note",
+            "due_date": None,
+        }
+        adapter._session = FakeSession(
+            {
+                "boards/7/stacks/70/cards/701": {"payload": {}},
+            }
+        )
+
+        await adapter.update_card_checklist(
+            "deck:board:7:card:701",
+            [
+                {"checked": True, "text": "write note"},
+                {"checked": False, "text": "announce rollout"},
+            ],
+        )
+
+        self.assertEqual(
+            "Intro\n- [x] write note\n- [ ] announce rollout",
+            adapter._work_item_index["deck:board:7:card:701"]["description"],
+        )
 
 
 class ConfigHelpersTests(unittest.TestCase):

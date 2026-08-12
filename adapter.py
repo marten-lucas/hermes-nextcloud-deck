@@ -81,7 +81,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._discovered_boards: Dict[str, Dict[str, Any]] = {}
+        self._board_stack_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         self._card_snapshots: Dict[str, str] = {}
+        self._work_item_index: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _as_float(value: Any, default: float) -> float:
@@ -157,7 +159,29 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             body = await resp.json(content_type=None)
             if resp.status >= 400:
                 raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
-            return body
+            return self._unwrap_ocs(body)
+
+    async def _api_post(self, path: str, data: Dict[str, Any]) -> Any:
+        session = await self._ensure_session()
+        async with session.post(self._deck_url(path), json=data, headers=self._api_headers()) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 400:
+                raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
+            return self._unwrap_ocs(body)
+
+    async def _api_put(self, path: str, data: Dict[str, Any]) -> Any:
+        session = await self._ensure_session()
+        async with session.put(self._deck_url(path), json=data, headers=self._api_headers()) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status >= 400:
+                raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
+            return self._unwrap_ocs(body)
+
+    @staticmethod
+    def _unwrap_ocs(body: Any) -> Any:
+        if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
+            return body["ocs"].get("data")
+        return body
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
@@ -232,6 +256,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         stacks = await self._api_get(f"boards/{board_id}/stacks")
         if not isinstance(stacks, list):
             raise RuntimeError(f"Expected stacks list for board {board_id}, got {type(stacks).__name__}")
+        self._board_stack_index[board_id] = self._index_board_stacks(stacks)
         emitted: List[MessageEvent] = []
         for stack in stacks:
             if not isinstance(stack, dict):
@@ -278,6 +303,17 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 "checklist_items": self._extract_checklist_items(description),
                 "comments": self._normalize_comments(comments),
             },
+        }
+        work_item_id = self._work_item_id(payload)
+        self._work_item_index[work_item_id] = {
+            "board_id": payload["board"]["id"],
+            "board_title": payload["board"]["title"],
+            "stack_id": payload["stack"]["id"],
+            "stack_title": payload["stack"]["title"],
+            "card_id": payload["card"]["id"],
+            "card_title": payload["card"]["title"],
+            "description": payload["card"]["description"],
+            "due_date": payload["card"]["due_date"],
         }
         return payload
 
@@ -387,6 +423,34 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return items
 
     @staticmethod
+    def _merge_checklist_into_description(
+        description: str,
+        checklist_items: List[Dict[str, Any]],
+    ) -> str:
+        lines = str(description or "").splitlines()
+        new_lines = [
+            f"- [{'x' if bool(item.get('checked')) else ' '}] {str(item.get('text') or '').strip()}".rstrip()
+            for item in checklist_items
+            if str(item.get("text") or "").strip()
+        ]
+        checklist_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if re.match(r"^\s*[-*]\s+\[([ xX])\]\s+(.*)$", line)
+        ]
+        if not checklist_indexes:
+            if not new_lines:
+                return str(description or "")
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(new_lines)
+            return "\n".join(lines)
+        first = checklist_indexes[0]
+        last = checklist_indexes[-1]
+        rebuilt = lines[:first] + new_lines + lines[last + 1 :]
+        return "\n".join(rebuilt).strip("\n")
+
+    @staticmethod
     def _format_card_prompt(payload: Dict[str, Any]) -> str:
         checklist = payload["card"]["checklist_items"]
         checklist_text = (
@@ -427,14 +491,125 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        del chat_id, content, reply_to, metadata
-        return SendResult(
-            success=False,
-            error="Nextcloud Deck outbound send is not implemented in phase 1; use later writeback phases.",
-        )
+        work_item = self._work_item_index.get(str(chat_id))
+        if not work_item:
+            return SendResult(success=False, error=f"Unknown Nextcloud Deck work item: {chat_id}")
+        operations_run = False
+        metadata = metadata or {}
+        checklist_items = metadata.get("checklist_items")
+        if checklist_items is not None:
+            await self.update_card_checklist(chat_id, checklist_items)
+            operations_run = True
+        target_status = metadata.get("target_status")
+        if target_status:
+            await self.move_card_to_status(chat_id, str(target_status))
+            operations_run = True
+        if content:
+            comment = await self._api_post(
+                f"cards/{work_item['card_id']}/comments",
+                {"message": content[:1000], "parentId": reply_to},
+            )
+            operations_run = True
+            message_id = None
+            if isinstance(comment, dict):
+                message_id = str(comment.get("id", "") or "") or None
+            return SendResult(success=True, message_id=message_id)
+        if operations_run:
+            return SendResult(success=True)
+        return SendResult(success=False, error="No Deck writeback operation requested.")
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "work_item"}
+
+    async def move_card_to_status(self, work_item_id: str, status_key: str) -> None:
+        work_item = self._require_work_item(work_item_id)
+        board_id = work_item["board_id"]
+        current_stack_id = work_item["stack_id"]
+        target_stack_id = self._resolve_target_stack_id(board_id, status_key)
+        if target_stack_id is None:
+            raise RuntimeError(f"No stack mapping for status '{status_key}' on board {board_id}")
+        if target_stack_id == current_stack_id:
+            return
+        await self._api_put(
+            f"boards/{board_id}/stacks/{current_stack_id}/cards/{work_item['card_id']}/reorder",
+            {"order": 0, "stackId": int(target_stack_id) if str(target_stack_id).isdigit() else target_stack_id},
+        )
+        stack_info = self._resolve_stack_info(board_id, target_stack_id)
+        work_item["stack_id"] = target_stack_id
+        work_item["stack_title"] = stack_info.get("title", work_item["stack_title"])
+
+    async def update_card_checklist(self, work_item_id: str, checklist_items: List[Dict[str, Any]]) -> None:
+        work_item = self._require_work_item(work_item_id)
+        rendered_description = self._merge_checklist_into_description(
+            work_item.get("description", ""),
+            checklist_items,
+        )
+        await self._api_put(
+            f"boards/{work_item['board_id']}/stacks/{work_item['stack_id']}/cards/{work_item['card_id']}",
+            {
+                "title": work_item["card_title"],
+                "description": rendered_description,
+                "type": "plain",
+                "order": 999,
+                "duedate": work_item.get("due_date"),
+            },
+        )
+        work_item["description"] = rendered_description
+        payload = {
+            "board": {"id": work_item["board_id"], "title": work_item["board_title"]},
+            "stack": {"id": work_item["stack_id"], "title": work_item["stack_title"]},
+            "card": {
+                "id": work_item["card_id"],
+                "title": work_item["card_title"],
+                "description": rendered_description,
+                "due_date": work_item.get("due_date"),
+                "assigned_users": [],
+                "checklist_items": self._extract_checklist_items(rendered_description),
+                "comments": [],
+            },
+        }
+        self._card_snapshots[work_item_id] = self._payload_signature(payload)
+
+    def _require_work_item(self, work_item_id: str) -> Dict[str, Any]:
+        work_item = self._work_item_index.get(str(work_item_id))
+        if not work_item:
+            raise RuntimeError(f"Unknown Nextcloud Deck work item: {work_item_id}")
+        return work_item
+
+    def _resolve_target_stack_id(self, board_id: str, status_key: str) -> Optional[str]:
+        board_mapping = self.runtime.board_stack_mapping.get(str(board_id), {})
+        target = board_mapping.get(status_key)
+        if target is None:
+            return None
+        target_text = str(target).strip()
+        if target_text.isdigit():
+            return target_text
+        stack_info = self._resolve_stack_by_title(board_id, target_text)
+        return stack_info.get("id") if stack_info else None
+
+    def _resolve_stack_by_title(self, board_id: str, title: str) -> Optional[Dict[str, str]]:
+        stack_index = self._board_stack_index.get(str(board_id), {})
+        return stack_index.get(str(title).casefold())
+
+    def _resolve_stack_info(self, board_id: str, stack_id: str) -> Dict[str, str]:
+        stack_index = self._board_stack_index.get(str(board_id), {})
+        for stack in stack_index.values():
+            if stack.get("id") == str(stack_id):
+                return stack
+        return {"id": str(stack_id), "title": str(stack_id)}
+
+    @staticmethod
+    def _index_board_stacks(stacks: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+        indexed: Dict[str, Dict[str, str]] = {}
+        for stack in stacks:
+            if not isinstance(stack, dict):
+                continue
+            stack_id = str(stack.get("id", "")).strip()
+            title = str(stack.get("title") or "").strip()
+            if not stack_id or not title:
+                continue
+            indexed[title.casefold()] = {"id": stack_id, "title": title}
+        return indexed
 
 
 def nextcloud_deck_deps_present() -> bool:
