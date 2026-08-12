@@ -68,14 +68,73 @@ Das bedeutet fuer die spaetere Prompt-/Event-Aufbereitung:
 - Hermes darf Checkboxen abhaken
 - Hermes darf Checkboxen ergaenzen
 
-### 5. Talk-Spiegelung
+### 5. Talk-Spiegelung / Talk-Reminder
 
-Talk ist nur **optional**.
+Talk ist nur **optional** und soll standardmaessig **nicht** zu doppelten Benachrichtigungen fuehren.
+
+Da Deck-Nutzer in der Regel bereits ueber Deck selbst benachrichtigt werden, soll Talk **nicht** einfach jede Deck-Aktivitaet spiegeln.
+
+Stattdessen gilt als Produktziel:
+
+- primaere Rueckmeldung bleibt in Deck
+- Talk wird nur fuer **Reminder / Follow-up** verwendet
+- ein Talk-Ping erfolgt nur, wenn auf eine Hermes-relevante Deck-Aktion **keine erkennbare menschliche Reaktion** erfolgt
 
 Pro Board soll konfigurierbar sein:
 
-- ob ueberhaupt nach Talk gespiegelt wird
-- in welchen Talk-Raum gespiegelt wird
+- ob Talk-Follow-up ueberhaupt aktiv ist
+- in welchen Talk-Raum erinnert werden soll
+- welches Patience-Profil genutzt wird:
+  - `low`
+  - `medium`
+  - `high`
+
+### Definition von "keine Reaktion"
+
+Fuer das Deck-Plugin ist eine Reaktion zunaechst jede **nicht von Hermes stammende** Aenderung am betroffenen Work Item, z. B.:
+
+- neuer menschlicher Kommentar
+- Stack-Wechsel
+- Checkbox-Aenderung
+- Titel-/Beschreibungsaenderung
+- Aenderung der Zuweisung
+
+Wenn nach einer relevanten Hermes-Aktion keine solche Aenderung erfolgt, bleibt das Work Item im Zustand `awaiting_human_response`.
+
+### Reminder-Strategie statt Voll-Mirroring
+
+Der geplante Talk-Mechanismus ist deshalb fachlich eher ein:
+
+- `reminder_via_talk`
+
+als ein:
+
+- `mirror_everything_to_talk`
+
+### Patience-Konfiguration
+
+Geplante Konfiguration pro Board:
+
+- `reminder_via_talk: true|false`
+- `patience: low|medium|high`
+
+Die konkrete Wartezeit soll spaeter **nicht statisch** nur an der Konfiguration haengen, sondern relativ zur Aufgabe durch Hermes bewertet werden.
+
+Beispielidee:
+
+- eine dringende Aufgabe mit `high` patience bekommt trotzdem frueher ein Follow-up als eine triviale Aufgabe mit `high` patience
+- `low|medium|high` ist also eher ein Multiplikator bzw. Policy-Profil als eine feste Minutenanzahl
+
+Die konkrete Interpretation der Patience-Profile ist aktuell **TBD** und soll spaeter durch LLM-gestuetzte Dringlichkeitseinschaetzung mitbestimmt werden.
+
+### Anti-Spam-Regeln
+
+Geplante Schutzregeln:
+
+- kein sofortiges Doppelposting in Deck und Talk
+- pro offener Hermes-Frage hoechstens ein erster Reminder
+- weitere Reminder nur bei ausdruecklicher spaeterer Ausbaustufe
+- Reminder endet sofort, sobald menschliche Reaktion erkannt wird
 
 ## Board-Discovery: Wie kommt ein Board zum Adapter?
 
@@ -142,6 +201,9 @@ platforms:
             in_progress: "In Arbeit"
             blocked: "Blockiert"
             done: "Erledigt"
+          reminder_via_talk: false
+          talk_room_id: ""
+          patience: "medium"
 ```
 
 In dieser Stufe gilt:
@@ -149,6 +211,48 @@ In dieser Stufe gilt:
 - nur konfigurierte Boards werden inhaltlich ingestiert
 - innerhalb dieser Boards werden nur Karten verarbeitet, die dem Hermes-User zugewiesen sind
 - das Stack-Mapping ist noch manuell
+- Talk-Follow-up bleibt optional und ist zunaechst konfigurationsgetrieben
+
+## Nutzung des bestehenden Nextcloud-Talk-Plugins
+
+Wenn Talk-Reminder aktiviert ist, soll das Deck-Plugin **nicht** eigene Talk-API-Logik duplizieren, sondern das bestehende Nextcloud-Talk-Plugin verwenden.
+
+### Produktanforderung
+
+- Talk-Reminder ist nur verfuegbar, wenn das Talk-Plugin installiert und aktiv ist
+- ohne Talk-Plugin bleibt das Deck-Plugin voll funktionsfaehig, aber Reminder-via-Talk ist deaktiviert
+
+### Gewuenschte technische Richtung
+
+Das Deck-Plugin soll das Talk-Plugin **nicht per direktem Code-Import** benutzen.
+
+Stattdessen soll es Hermes-intern ueber die bestehende Delivery-/Adapter-Infrastruktur senden.
+
+Begruendung:
+
+- lose Kopplung zwischen zwei Plugins
+- kein Duplizieren von Talk-spezifischer Auth-/Sende-Logik
+- das Talk-Plugin bleibt die einzige Quelle fuer Talk-Transportverhalten
+
+### Beleg aus der Hermes-Doku
+
+Die Hermes-Doku [adding-platform-adapters](https://hermes-agent.nousresearch.com/docs/developer-guide/adding-platform-adapters) beschreibt, dass:
+
+- der `send engine (tools/send_message_tool.py)` ueber den **live gateway adapter** routet
+- Plugin-Plattformen ueber `ctx.register_platform()` in diese Infrastruktur eingehaengt werden
+- fuer out-of-process Faelle optional `standalone_sender_fn` registriert werden kann
+
+Daraus folgt fuer das Zielbild:
+
+- das Deck-Plugin sollte fuer Talk-Reminder Hermes-intern an die Plattform `nextcloud` delegieren
+- also an das bestehende Talk-Plugin, sofern dieses live registriert/verfuegbar ist
+
+### Umsetzungskonsequenz
+
+Der genaue Hermes-interne Aufrufpfad fuer diese Delegation ist noch **technisch zu konkretisieren**, aber die Architekturentscheidung ist klar:
+
+- **Delegation an das Talk-Plugin ja**
+- **direkter Import des Talk-Adapters nein**
 
 ## Pairing-Flow: Beweislage aus Hermes-Source/Doku
 

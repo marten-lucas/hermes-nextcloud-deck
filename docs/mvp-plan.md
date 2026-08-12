@@ -103,22 +103,25 @@ Definition of done:
 - Hermes kann die Karte in eine konfigurierte Zielspalte verschieben
 - Hermes kann Checkboxen abhaken oder ergaenzen
 
-## Phase 4 – Optionale Talk-Spiegelung
+## Phase 4 – Optionale Talk-Reminder
 
 Ziel:
 
-Deck bleibt die Primaerquelle, Talk wird zum optionalen Informationskanal.
+Deck bleibt die Primaerquelle, Talk wird zum optionalen **Follow-up-Kanal**.
 
 Umfang:
 
-- pro Board aktivierbares Talk-Mirroring
+- pro Board aktivierbares `reminder_via_talk`
 - Konfiguration fuer Zielraum
-- kompakte Spiegelnachrichten
+- Konfiguration fuer `patience: low|medium|high`
+- Reminder nur bei ausbleibender menschlicher Reaktion
+- Delegation an das bestehende Nextcloud-Talk-Plugin statt eigener Talk-Logik
 
 Definition of done:
 
-- bei aktiviertem Mirroring wird eine Deck-Aktion zusaetzlich in Talk gemeldet
-- bei deaktiviertem Mirroring bleibt alles ausschliesslich in Deck
+- bei aktiviertem Talk-Reminder wird nicht sofort gespiegelt, sondern nur bei ausbleibender Reaktion erinnert
+- bei deaktiviertem Talk-Reminder bleibt alles ausschliesslich in Deck
+- ohne installiertes Talk-Plugin faellt nur die Reminder-Funktion weg, nicht das Deck-Plugin insgesamt
 
 ## Phase 5 – Board-Onboarding / Pairing
 
@@ -179,5 +182,5 @@ Wenn die Umsetzung beginnt, sollte die Reihenfolge sein:
 3. Kommentar-Writeback
 4. Spaltenwechsel
 5. Checkbox-Writeback
-6. Talk-Mirroring
+6. Talk-Reminder
 7. Board-Onboarding
