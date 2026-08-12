@@ -120,6 +120,36 @@ Aus derselben Doku geht zudem hervor, dass die Karten-`description` **Markdown**
 - Standard-Talk-Raum
 - spaetere manuelle Mapping-Vorgaben fuer MVP-Phase 1/2
 
+## MVP-Konfigurationsform fuer Boards
+
+Im MVP werden relevante Boards bewusst ueber Konfiguration erfasst.
+
+Beispiel:
+
+```yaml
+platforms:
+  nextcloud_deck:
+    enabled: true
+    extra:
+      base_url: "https://cloud.example.org"
+      username: "hermes"
+      app_password: "app-password"
+      hermes_user_id: "hermes-user"
+      boards:
+        - board_id: "7"
+          stack_mapping:
+            todo: "Backlog"
+            in_progress: "In Arbeit"
+            blocked: "Blockiert"
+            done: "Erledigt"
+```
+
+In dieser Stufe gilt:
+
+- nur konfigurierte Boards werden inhaltlich ingestiert
+- innerhalb dieser Boards werden nur Karten verarbeitet, die dem Hermes-User zugewiesen sind
+- das Stack-Mapping ist noch manuell
+
 ## Pairing-Flow: Beweislage aus Hermes-Source/Doku
 
 Die bestehende Hermes-Pairing-Implementierung ist **kein Formular- oder Metadaten-Onboarding**, sondern ein **Code-basiertes Freigabesystem fuer Messaging-Nutzer**.

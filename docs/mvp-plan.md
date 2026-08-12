@@ -77,6 +77,7 @@ Wichtige Vereinfachung fuer den MVP:
 - **Stack-Mapping wird zunaechst manuell konfiguriert**
 - kein automatischer Pairing-Flow in dieser Phase
 - einfacher Board-Add-Flow bleibt **TBD**; fuer den MVP werden relevante Boards ueber Konfiguration erfasst
+- konkrete Form: `extra.boards[]` mit `board_id` und spaeterem `stack_mapping`
 
 Definition of done:
 
