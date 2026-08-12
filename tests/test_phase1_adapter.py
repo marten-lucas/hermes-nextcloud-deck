@@ -330,6 +330,196 @@ class Phase1AdapterTests(unittest.IsolatedAsyncioTestCase):
             adapter._work_item_index["deck:board:7:card:701"]["description"],
         )
 
+    async def test_send_can_schedule_talk_reminder_without_immediate_mirror(self):
+        config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes-user",
+                "boards": [
+                    {
+                        "board_id": "7",
+                        "reminder_via_talk": True,
+                        "talk_room_id": "room-77",
+                        "patience": "low",
+                    }
+                ],
+            },
+            token="",
+        )
+        adapter = MODULE.NextcloudDeckPlatform(config)
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "",
+            "due_date": None,
+            "board_config": config.extra["boards"][0],
+            "payload": {"board": {"id": "7"}, "stack": {"id": "70"}, "card": {"id": "701", "comments": []}},
+        }
+        adapter._session = FakeSession({"cards/701/comments": {"payload": {"id": "901", "message": "Done"}}})
+        adapter._time_fn = lambda: 1000.0
+
+        result = await adapter.send(
+            "deck:board:7:card:701",
+            "Done",
+            metadata={"await_human_response": True, "reminder_reason": "Bitte pruefen."},
+        )
+
+        self.assertTrue(result.success)
+        reminder = adapter._pending_reminders["deck:board:7:card:701"]
+        self.assertEqual("room-77", reminder.talk_room_id)
+        self.assertEqual(1300.0, reminder.due_at)
+        self.assertEqual(0, reminder.sent_count)
+
+    async def test_due_talk_reminder_uses_delegated_sender(self):
+        config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes-user",
+                "boards": [
+                    {
+                        "board_id": "7",
+                        "reminder_via_talk": True,
+                        "talk_room_id": "room-77",
+                        "patience": "low",
+                    }
+                ],
+            },
+            token="",
+        )
+        adapter = MODULE.NextcloudDeckPlatform(config)
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "",
+            "due_date": None,
+            "board_config": config.extra["boards"][0],
+            "payload": {"board": {"id": "7"}, "stack": {"id": "70"}, "card": {"id": "701", "comments": []}},
+        }
+        sent = []
+
+        async def _fake_talk_sender(**kwargs):
+            sent.append(kwargs)
+            return {"success": True, "message_id": "m1"}
+
+        adapter._talk_sender = _fake_talk_sender
+        adapter._pending_reminders["deck:board:7:card:701"] = MODULE.ReminderState(
+            work_item_id="deck:board:7:card:701",
+            board_id="7",
+            card_id="701",
+            talk_room_id="room-77",
+            patience="low",
+            due_at=0.0,
+            reason="Bitte reagieren.",
+        )
+        adapter._time_fn = lambda: 1000.0
+
+        await adapter._process_due_reminders()
+
+        self.assertEqual(1, len(sent))
+        self.assertEqual("nextcloud", sent[0]["platform"])
+        self.assertEqual("room-77", sent[0]["chat_id"])
+        self.assertEqual(1, adapter._pending_reminders["deck:board:7:card:701"].sent_count)
+
+    async def test_human_response_clears_pending_reminder(self):
+        config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes-user",
+                "boards": [
+                    {
+                        "board_id": "7",
+                        "reminder_via_talk": True,
+                        "talk_room_id": "room-77",
+                        "patience": "low",
+                    }
+                ],
+            },
+            token="",
+        )
+        adapter = MODULE.NextcloudDeckPlatform(config)
+        previous_payload = {
+            "board": {"id": "7", "title": "Infra"},
+            "stack": {"id": "70", "title": "Backlog"},
+            "card": {
+                "id": "701",
+                "title": "Prepare rollout",
+                "description": "- [ ] write note",
+                "due_date": None,
+                "assigned_users": [{"id": "hermes-user", "name": "Hermes"}],
+                "checklist_items": [{"checked": False, "text": "write note"}],
+                "comments": [],
+            },
+        }
+        adapter._work_item_index["deck:board:7:card:701"] = {
+            "board_id": "7",
+            "board_title": "Infra",
+            "stack_id": "70",
+            "stack_title": "Backlog",
+            "card_id": "701",
+            "card_title": "Prepare rollout",
+            "description": "- [ ] write note",
+            "due_date": None,
+            "board_config": config.extra["boards"][0],
+            "payload": previous_payload,
+        }
+        adapter._pending_reminders["deck:board:7:card:701"] = MODULE.ReminderState(
+            work_item_id="deck:board:7:card:701",
+            board_id="7",
+            card_id="701",
+            talk_room_id="room-77",
+            patience="low",
+            due_at=500.0,
+            reason="Bitte reagieren.",
+        )
+        adapter._session = FakeSession(
+            {
+                "boards": {"payload": [{"id": 7, "title": "Infra"}]},
+                "boards/7/stacks": {
+                    "payload": [
+                        {
+                            "id": 70,
+                            "title": "Backlog",
+                            "cards": [
+                                {
+                                    "id": 701,
+                                    "title": "Prepare rollout",
+                                    "description": "- [ ] write note",
+                                    "assignedUsers": [{"uid": "hermes-user", "displayname": "Hermes"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "cards/701/comments": {
+                    "payload": [
+                        {
+                            "id": 900,
+                            "message": "Ich kuemmere mich.",
+                            "actor": {"uid": "alice", "displayname": "Alice"},
+                        }
+                    ]
+                },
+            }
+        )
+
+        await adapter.poll_once()
+
+        self.assertNotIn("deck:board:7:card:701", adapter._pending_reminders)
+
 
 class ConfigHelpersTests(unittest.TestCase):
     def test_validate_config_requires_hermes_user_id(self):

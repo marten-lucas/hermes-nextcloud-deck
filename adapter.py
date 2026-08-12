@@ -5,8 +5,9 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
@@ -71,6 +72,18 @@ class DeckRuntimeConfig:
     observed_boards: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
+@dataclass
+class ReminderState:
+    work_item_id: str
+    board_id: str
+    card_id: str
+    talk_room_id: str
+    patience: str
+    due_at: float
+    reason: str
+    sent_count: int = 0
+
+
 class NextcloudDeckPlatform(BasePlatformAdapter):
     """Minimal Phase 1 Nextcloud Deck adapter using polling transport."""
 
@@ -84,6 +97,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._board_stack_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         self._card_snapshots: Dict[str, str] = {}
         self._work_item_index: Dict[str, Dict[str, Any]] = {}
+        self._pending_reminders: Dict[str, ReminderState] = {}
+        self._talk_sender: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
+        self._time_fn: Callable[[], float] = time.time
 
     @staticmethod
     def _as_float(value: Any, default: float) -> float:
@@ -249,6 +265,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             if board_id not in self.runtime.observed_boards:
                 continue
             events.extend(await self._ingest_board_once(board))
+        await self._process_due_reminders()
         return events
 
     async def _ingest_board_once(self, board: Dict[str, Any]) -> List[MessageEvent]:
@@ -305,6 +322,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             },
         }
         work_item_id = self._work_item_id(payload)
+        board_config = self.runtime.observed_boards.get(payload["board"]["id"], {})
+        previous = self._work_item_index.get(work_item_id, {})
         self._work_item_index[work_item_id] = {
             "board_id": payload["board"]["id"],
             "board_title": payload["board"]["title"],
@@ -314,7 +333,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             "card_title": payload["card"]["title"],
             "description": payload["card"]["description"],
             "due_date": payload["card"]["due_date"],
+            "payload": payload,
+            "board_config": board_config,
         }
+        if self._pending_reminders.get(work_item_id) and self._is_human_response(previous.get("payload"), payload):
+            self._pending_reminders.pop(work_item_id, None)
         return payload
 
     def _maybe_build_card_event(self, payload: Dict[str, Any]) -> Optional[MessageEvent]:
@@ -504,11 +527,17 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if target_status:
             await self.move_card_to_status(chat_id, str(target_status))
             operations_run = True
+        if metadata.get("await_human_response"):
+            self._schedule_talk_reminder(
+                chat_id,
+                reason=str(metadata.get("reminder_reason") or "Awaiting human response on Deck work item."),
+            )
         if content:
             comment = await self._api_post(
                 f"cards/{work_item['card_id']}/comments",
                 {"message": content[:1000], "parentId": reply_to},
             )
+            self._record_local_comment(work_item, comment, str(content[:1000]))
             operations_run = True
             message_id = None
             if isinstance(comment, dict):
@@ -537,6 +566,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         stack_info = self._resolve_stack_info(board_id, target_stack_id)
         work_item["stack_id"] = target_stack_id
         work_item["stack_title"] = stack_info.get("title", work_item["stack_title"])
+        payload = work_item.get("payload") or {}
+        if isinstance(payload, dict):
+            payload.setdefault("stack", {})
+            payload["stack"]["id"] = target_stack_id
+            payload["stack"]["title"] = work_item["stack_title"]
+            self._card_snapshots[work_item_id] = self._payload_signature(payload)
 
     async def update_card_checklist(self, work_item_id: str, checklist_items: List[Dict[str, Any]]) -> None:
         work_item = self._require_work_item(work_item_id)
@@ -555,20 +590,155 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             },
         )
         work_item["description"] = rendered_description
-        payload = {
+        payload = work_item.get("payload") or {}
+        if isinstance(payload, dict):
+            payload.setdefault("card", {})
+            payload["card"]["description"] = rendered_description
+            payload["card"]["checklist_items"] = self._extract_checklist_items(rendered_description)
+            self._card_snapshots[work_item_id] = self._payload_signature(payload)
+
+    def _schedule_talk_reminder(self, work_item_id: str, *, reason: str) -> None:
+        work_item = self._require_work_item(work_item_id)
+        board_config = work_item.get("board_config") or {}
+        if not self._is_talk_reminder_enabled(board_config):
+            return
+        talk_room_id = str(board_config.get("talk_room_id") or "").strip()
+        if not talk_room_id:
+            return
+        patience = str(board_config.get("patience") or "medium").strip().lower()
+        due_at = self._time_fn() + self._reminder_delay_seconds(patience)
+        self._pending_reminders[work_item_id] = ReminderState(
+            work_item_id=work_item_id,
+            board_id=work_item["board_id"],
+            card_id=work_item["card_id"],
+            talk_room_id=talk_room_id,
+            patience=patience,
+            due_at=due_at,
+            reason=reason,
+        )
+
+    async def _process_due_reminders(self) -> None:
+        now = self._time_fn()
+        due = [state for state in self._pending_reminders.values() if state.due_at <= now and state.sent_count == 0]
+        for state in due:
+            ok = await self._send_talk_reminder(state)
+            if ok:
+                state.sent_count += 1
+
+    async def _send_talk_reminder(self, state: ReminderState) -> bool:
+        work_item = self._work_item_index.get(state.work_item_id)
+        if not work_item:
+            return False
+        sender = self._resolve_talk_sender()
+        if sender is None:
+            logger.warning("Nextcloud Deck talk reminder skipped: Nextcloud Talk sender unavailable")
+            return False
+        content = (
+            f"Erinnerung zu Deck-Karte '{work_item['card_title']}' "
+            f"(Board: {work_item['board_title']}): {state.reason}"
+        )
+        result = await sender(
+            platform="nextcloud",
+            chat_id=state.talk_room_id,
+            content=content,
+        )
+        return bool(result.get("success"))
+
+    def _resolve_talk_sender(self) -> Optional[Callable[..., Awaitable[Dict[str, Any]]]]:
+        if self._talk_sender is not None:
+            return self._talk_sender
+        try:
+            from tools.send_message_tool import send_message as send_message_tool  # type: ignore
+        except Exception:
+            return None
+
+        async def _sender(*, platform: str, chat_id: str, content: str, **kwargs: Any) -> Dict[str, Any]:
+            result = send_message_tool(platform=platform, chat_id=chat_id, content=content, **kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+
+        self._talk_sender = _sender
+        return self._talk_sender
+
+    @staticmethod
+    def _is_talk_reminder_enabled(board_config: Dict[str, Any]) -> bool:
+        return str(board_config.get("reminder_via_talk", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _reminder_delay_seconds(patience: str) -> float:
+        normalized = str(patience or "").strip().lower()
+        if normalized == "low":
+            return 300.0
+        if normalized == "high":
+            return 7200.0
+        return 1800.0
+
+    def _record_local_comment(self, work_item: Dict[str, Any], comment: Any, fallback_message: str) -> None:
+        payload = work_item.get("payload") or {
             "board": {"id": work_item["board_id"], "title": work_item["board_title"]},
             "stack": {"id": work_item["stack_id"], "title": work_item["stack_title"]},
             "card": {
                 "id": work_item["card_id"],
                 "title": work_item["card_title"],
-                "description": rendered_description,
+                "description": work_item.get("description", ""),
                 "due_date": work_item.get("due_date"),
                 "assigned_users": [],
-                "checklist_items": self._extract_checklist_items(rendered_description),
+                "checklist_items": self._extract_checklist_items(work_item.get("description", "")),
                 "comments": [],
             },
         }
-        self._card_snapshots[work_item_id] = self._payload_signature(payload)
+        if not isinstance(payload, dict):
+            return
+        work_item["payload"] = payload
+        payload.setdefault("card", {})
+        card_payload = payload["card"]
+        comments = list(card_payload.get("comments") or [])
+        if isinstance(comment, dict):
+            comments.append(
+                {
+                    "id": str(comment.get("id", "")).strip(),
+                    "message": str(comment.get("message") or fallback_message),
+                    "author_id": self.runtime.username,
+                    "author_name": self.runtime.username,
+                    "created_at": str(comment.get("creationDateTime") or ""),
+                }
+            )
+        else:
+            comments.append(
+                {
+                    "id": "",
+                    "message": fallback_message,
+                    "author_id": self.runtime.username,
+                    "author_name": self.runtime.username,
+                    "created_at": "",
+                }
+            )
+        card_payload["comments"] = comments
+        self._card_snapshots[self._work_item_id(payload)] = self._payload_signature(payload)
+
+    def _is_human_response(self, previous_payload: Any, current_payload: Dict[str, Any]) -> bool:
+        if not isinstance(previous_payload, dict):
+            return False
+        if self._payload_signature(previous_payload) == self._payload_signature(current_payload):
+            return False
+        previous_card = previous_payload.get("card") or {}
+        current_card = current_payload.get("card") or {}
+        previous_stack = previous_payload.get("stack") or {}
+        current_stack = current_payload.get("stack") or {}
+        previous_comments = previous_card.get("comments") or []
+        current_comments = current_card.get("comments") or []
+        if len(current_comments) > len(previous_comments):
+            latest = current_comments[-1] if current_comments else {}
+            author_id = str(latest.get("author_id") or "").strip()
+            if author_id and author_id not in {self.runtime.username, self.runtime.hermes_user_id}:
+                return True
+        if str(previous_stack.get("id") or "") != str(current_stack.get("id") or ""):
+            return True
+        for key in ("description", "title", "due_date", "assigned_users", "checklist_items"):
+            if previous_card.get(key) != current_card.get(key):
+                return True
+        return False
 
     def _require_work_item(self, work_item_id: str) -> Dict[str, Any]:
         work_item = self._work_item_index.get(str(work_item_id))
