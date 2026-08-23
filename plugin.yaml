@@ -1,7 +1,7 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.1.2
+version: 0.1.3
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Connects as a regular Nextcloud user, polls Deck boards via the official API,
@@ -9,17 +9,17 @@ description: >
   the basis for Deck-backed work item sessions with Talk notification reminders.
 author: Local Development
 requires_env:
-  - name: NEXTCLOUD_BASE_URL
+  - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance (e.g. https://cloud.example.org)"
-    prompt: "Nextcloud base URL"
+    prompt: "Nextcloud Deck base URL"
     password: false
-  - name: NEXTCLOUD_USERNAME
+  - name: NEXTCLOUD_DECK_USERNAME
     description: "Nextcloud username used by the Hermes Deck adapter"
-    prompt: "Nextcloud username"
+    prompt: "Nextcloud Deck username"
     password: false
-  - name: NEXTCLOUD_APP_PASSWORD
+  - name: NEXTCLOUD_DECK_APP_PASSWORD
     description: "Nextcloud app password for the Hermes Deck adapter"
-    prompt: "Nextcloud app password"
+    prompt: "Nextcloud Deck app password"
     password: true
   - name: NEXTCLOUD_DECK_HERMES_USER_ID
     description: "Nextcloud Deck user ID that marks cards as assigned to Hermes"
