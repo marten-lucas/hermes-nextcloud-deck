@@ -104,7 +104,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     @property
     def is_connected(self) -> bool:
-        """Zeigt die Plattform als verbunden an, sobald Polling aktiv läuft."""
         return bool(
             self._connected_flag
             and self._session
@@ -123,7 +122,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     def _build_runtime_config(self, config: PlatformConfig) -> DeckRuntimeConfig:
         extra = getattr(config, "extra", {}) or {}
         
-        # Base URL Sanity Check & Fallback logic
         raw_url = str(
             extra.get("base_url")
             or extra.get("deck_base_url")
@@ -342,9 +340,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             for card in stack.get("cards") or []:
                 if not isinstance(card, dict):
                     continue
-                if not self._card_assigned_to_hermes(card):
+                
+                card_id = str(card.get("id", "")).strip()
+                comments = await self._api_get(f"cards/{card_id}/comments")
+                if not isinstance(comments, list):
+                    comments = []
+
+                if not self._card_should_process(card, comments):
                     continue
-                payload = await self._build_card_payload(board, stack, card)
+
+                payload = await self._build_card_payload(board, stack, card, comments)
                 event = self._maybe_build_card_event(payload)
                 if event is None:
                     continue
@@ -352,16 +357,41 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 emitted.append(event)
         return emitted
 
+    def _card_should_process(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
+        if self._card_assigned_to_hermes(card):
+            return True
+
+        targets = {
+            self.runtime.hermes_user_id.lower(),
+            self.runtime.username.lower(),
+            "ki_assistent",
+            "ki gerda",
+        }
+        
+        desc = str(card.get("description") or "").lower()
+        if any(target in desc for target in targets):
+            return True
+
+        for c in comments:
+            msg = str(c.get("message") or "").lower()
+            if any(target in msg for target in targets):
+                return True
+
+        return False
+
     async def _build_card_payload(
         self,
         board: Dict[str, Any],
         stack: Dict[str, Any],
         card: Dict[str, Any],
+        comments: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         card_id = str(card.get("id", "")).strip()
-        comments = await self._api_get(f"cards/{card_id}/comments")
-        if not isinstance(comments, list):
-            comments = []
+        
+        attachments = await self._api_get(f"cards/{card_id}/attachments")
+        if not isinstance(attachments, list):
+            attachments = []
+
         description = str(card.get("description") or "")
         payload = {
             "board": {
@@ -380,6 +410,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 "assigned_users": self._normalize_assigned_users(card.get("assignedUsers")),
                 "checklist_items": self._extract_checklist_items(description),
                 "comments": self._normalize_comments(comments),
+                "attachments": [
+                    {"id": a.get("id"), "name": a.get("filename") or a.get("displayname")}
+                    for a in attachments if isinstance(a, dict)
+                ],
             },
         }
         work_item_id = self._work_item_id(payload)
@@ -557,7 +591,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 for item in checklist
             )
             if checklist
-            else "(none)"
+            else "(keine)"
         )
         comments = payload["card"]["comments"]
         comments_text = (
@@ -567,20 +601,51 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 if comment["message"]
             )
             if comments
-            else "(none)"
+            else "(keine)"
+        )
+        attachments = payload["card"].get("attachments", [])
+        attachments_text = (
+            "\n".join(f"- {a['name']} (ID: {a['id']})" for a in attachments)
+            if attachments
+            else "(keine)"
         )
         return "\n".join(
             [
-                f"Nextcloud Deck work item from board '{payload['board']['title']}' in stack '{payload['stack']['title']}'.",
-                f"Card title: {payload['card']['title']}",
-                "Description:",
-                payload["card"]["description"] or "(empty)",
-                "Checklist:",
+                f"Nextcloud Deck Aufgabe vom Board '{payload['board']['title']}' im Stack '{payload['stack']['title']}'.",
+                f"Karten-Titel: {payload['card']['title']}",
+                "Beschreibung & Subaufgaben:",
+                payload["card"]["description"] or "(leer)",
+                "Dateianhänge:",
+                attachments_text,
+                "Checkliste:",
                 checklist_text,
-                "Comments:",
+                "Kommentare:",
                 comments_text,
+                "",
+                "Hinweis für Agent: Leite die Aufgabenstellung aus Beschreibung, Kommentaren und Anhängen ab.",
+                "Falls Subaufgaben/Checklisten verarbeitet werden sollen, antworte per Kommentar oder aktualisiere die Beschreibung.",
             ]
         )
+
+    async def update_card_description(self, work_item_id: str, new_description: str) -> None:
+        work_item = self._require_work_item(work_item_id)
+        await self._api_put(
+            f"boards/{work_item['board_id']}/stacks/{work_item['stack_id']}/cards/{work_item['card_id']}",
+            {
+                "title": work_item["card_title"],
+                "description": new_description,
+                "type": "plain",
+                "order": 999,
+                "duedate": work_item.get("due_date"),
+            },
+        )
+        work_item["description"] = new_description
+        payload = work_item.get("payload") or {}
+        if isinstance(payload, dict):
+            payload.setdefault("card", {})
+            payload["card"]["description"] = new_description
+            payload["card"]["checklist_items"] = self._extract_checklist_items(new_description)
+            self._card_snapshots[work_item_id] = self._payload_signature(payload)
 
     async def send(
         self,
@@ -594,19 +659,28 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return SendResult(success=False, error=f"Unknown Nextcloud Deck work item: {chat_id}")
         operations_run = False
         metadata = metadata or {}
+        
+        new_description = metadata.get("description") or metadata.get("new_description")
+        if new_description:
+            await self.update_card_description(chat_id, str(new_description))
+            operations_run = True
+
         checklist_items = metadata.get("checklist_items")
         if checklist_items is not None:
             await self.update_card_checklist(chat_id, checklist_items)
             operations_run = True
+
         target_status = metadata.get("target_status")
         if target_status:
             await self.move_card_to_status(chat_id, str(target_status))
             operations_run = True
+
         if metadata.get("await_human_response"):
             self._schedule_talk_reminder(
                 chat_id,
                 reason=str(metadata.get("reminder_reason") or "Awaiting human response on Deck work item."),
             )
+
         if content:
             comment = await self._api_post(
                 f"cards/{work_item['card_id']}/comments",
@@ -618,6 +692,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             if isinstance(comment, dict):
                 message_id = str(comment.get("id", "") or "") or None
             return SendResult(success=True, message_id=message_id)
+
         if operations_run:
             return SendResult(success=True)
         return SendResult(success=False, error="No Deck writeback operation requested.")
@@ -989,7 +1064,7 @@ def register(ctx: Any) -> None:
         standalone_sender_fn=standalone_send,
         platform_hint=(
             "You are processing Nextcloud Deck work items. "
-            "Cards assigned to the Hermes Deck user are the relevant work items."
+            "Cards assigned to or mentioning the Hermes Deck user are relevant work items."
         ),
         max_message_length=16000,
         emoji="🗂️",
