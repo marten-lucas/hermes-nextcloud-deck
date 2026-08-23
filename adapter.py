@@ -47,7 +47,7 @@ except Exception:
         user_name: Optional[str] = None
 
     class BasePlatformAdapter:  # pragma: no cover - local fallback
-        def __init__(self, config: Any, platform: str = "nextcloud_deck") -> None:
+        def __init__(self, config: Any, platform: str = "deck") -> None:
             self.config = config
             self.platform = platform
 
@@ -88,7 +88,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     """Nextcloud Deck adapter using polling transport."""
 
     def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform("nextcloud_deck"))
+        super().__init__(config, Platform("deck"))
         self.runtime = self._build_runtime_config(config)
         self._session: Optional[aiohttp.ClientSession] = None
         self._stop_event = asyncio.Event()
@@ -971,7 +971,7 @@ def check_is_connected(adapter_or_config: Any) -> bool:
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
     ctx.register_platform(
-        name="nextcloud_deck",
+        name="deck",
         label="Nextcloud Deck",
         adapter_factory=_build_adapter,
         check_fn=nextcloud_deck_deps_present,
