@@ -1,12 +1,12 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.1.0
+version: 0.1.2
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Connects as a regular Nextcloud user, polls Deck boards via the official API,
-  discovers boards visible to the Hermes user, and forms the basis for Deck-backed
-  work item sessions.
+  discovers boards visible to the Hermes user across multiple boards, and forms
+  the basis for Deck-backed work item sessions with Talk notification reminders.
 author: Local Development
 requires_env:
   - name: NEXTCLOUD_BASE_URL
