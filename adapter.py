@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote, urljoin
@@ -307,6 +308,89 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 body = await resp.text()
             return self._unwrap_ocs(body)
 
+    async def _fetch_card_comments(self, card_id: str) -> List[Dict[str, Any]]:
+        """Liest Kommentare über den funktionierenden WebDAV PROPFIND Endpoint."""
+        session = await self._ensure_session()
+        url = f"{self.runtime.base_url}/remote.php/dav/comments/deckCard/{card_id}/"
+        headers = self._api_headers()
+        headers["Content-Type"] = "application/xml"
+
+        try:
+            async with session.request("PROPFIND", url, headers=headers) as resp:
+                if resp.status >= 400:
+                    raw_text = await resp.text()
+                    logger.warning("WebDAV PROPFIND failed [%d] for card %s: %s", resp.status, card_id, raw_text[:200])
+                    return []
+                
+                xml_data = await resp.text()
+                return self._parse_webdav_comments_xml(xml_data)
+        except Exception as exc:
+            logger.warning("Error fetching comments via WebDAV for card %s: %s", card_id, exc)
+            return []
+
+    @staticmethod
+    def _parse_webdav_comments_xml(xml_string: str) -> List[Dict[str, Any]]:
+        comments: List[Dict[str, Any]] = []
+        try:
+            root = ET.fromstring(xml_string)
+            ns = {
+                "d": "DAV:",
+                "oc": "http://owncloud.org/ns",
+            }
+            for response in root.findall("d:response", ns):
+                propstat = response.find("d:propstat", ns)
+                if propstat is None:
+                    continue
+                prop = propstat.find("d:prop", ns)
+                if prop is None:
+                    continue
+                
+                message_node = prop.find("oc:message", ns)
+                if message_node is None or not message_node.text:
+                    continue
+                
+                comment_id = prop.findtext("oc:id", default="", namespaces=ns)
+                actor_id = prop.findtext("oc:actorId", default="", namespaces=ns)
+                actor_name = prop.findtext("oc:actorDisplayName", default="", namespaces=ns)
+                creation_dt = prop.findtext("oc:creationDateTime", default="", namespaces=ns)
+                
+                comments.append({
+                    "id": comment_id,
+                    "message": message_node.text,
+                    "actor": {
+                        "id": actor_id,
+                        "uid": actor_id,
+                        "displayname": actor_name or actor_id,
+                    },
+                    "creationDateTime": creation_dt,
+                })
+        except Exception as exc:
+            logger.warning("Failed to parse WebDAV XML comments: %s", exc)
+        return comments
+
+    async def _post_card_comment(self, card_id: str, message: str) -> Optional[str]:
+        """Postet einen Kommentar über den verifizierten WebDAV Endpoint."""
+        session = await self._ensure_session()
+        url = f"{self.runtime.base_url}/remote.php/dav/comments/deckCard/{card_id}/"
+        
+        payload = {
+            "actorType": "users",
+            "actorId": self.runtime.username,
+            "message": message[:1000],
+            "objectType": "deckCard",
+            "objectId": str(card_id),
+            "verb": "comment",
+        }
+
+        async with session.post(url, json=payload, headers=self._api_headers()) as resp:
+            if resp.status >= 400:
+                raw_text = await resp.text()
+                raise RuntimeError(f"WebDAV Comment POST failed [{resp.status}]: {raw_text[:200]}")
+            
+            location = resp.headers.get("Content-Location", "")
+            message_id = location.split("/")[-1] if location else None
+            return message_id
+
     @staticmethod
     def _unwrap_ocs(body: Any) -> Any:
         if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
@@ -433,9 +517,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 card_id = str(card.get("id", "")).strip()
                 card_title = str(card.get("title") or card_id)
 
-                comments = await self._api_get(f"cards/{card_id}/comments")
-                if not isinstance(comments, list):
-                    comments = []
+                comments = await self._fetch_card_comments(card_id)
 
                 if not self._card_should_process(card, comments, board_title):
                     continue
@@ -557,7 +639,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         user_groups = await self._get_user_groups(last_author)
         groups_header_str = ",".join(user_groups)
-        logger.warning("Deck RBAC Header gesetzt: User=%s, Groups=%s", last_author, groups_header_str)
 
         source = self.build_source(
             chat_id=work_item_id,
@@ -801,15 +882,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             )
 
         if content:
-            comment = await self._api_post(
-                f"cards/{work_item['card_id']}/comments",
-                {"message": content[:1000], "parentId": reply_to},
-            )
-            self._record_local_comment(work_item, comment, str(content[:1000]))
+            message_id = await self._post_card_comment(work_item["card_id"], content)
+            self._record_local_comment(work_item, {"id": message_id}, str(content[:1000]))
             operations_run = True
-            message_id = None
-            if isinstance(comment, dict):
-                message_id = str(comment.get("id", "") or "") or None
             return SendResult(success=True, message_id=message_id)
 
         if operations_run:
