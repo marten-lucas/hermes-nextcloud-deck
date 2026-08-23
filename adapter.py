@@ -93,6 +93,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._session: Optional[aiohttp.ClientSession] = None
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
+        self._connected_flag: bool = False
         self._discovered_boards: Dict[str, Dict[str, Any]] = {}
         self._board_stack_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         self._card_snapshots: Dict[str, str] = {}
@@ -103,9 +104,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     @property
     def is_connected(self) -> bool:
-        """Prüft, ob der Adapter aktiv läuft und eine offene Session hat."""
+        """Zeigt die Plattform als verbunden an, sobald Polling aktiv läuft."""
         return bool(
-            self._session
+            self._connected_flag
+            and self._session
             and not self._session.closed
             and not self._stop_event.is_set()
             and (self._polling_task is not None and not self._polling_task.done())
@@ -256,6 +258,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._stop_event.set()
+        self._connected_flag = False
         if self._polling_task is not None:
             self._polling_task.cancel()
             await asyncio.gather(self._polling_task, return_exceptions=True)
@@ -310,7 +313,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return dict(self._discovered_boards)
 
     async def poll_once(self) -> List[MessageEvent]:
-        boards = await self.fetch_boards_once()
+        try:
+            boards = await self.fetch_boards_once()
+            self._connected_flag = True
+        except Exception as exc:
+            self._connected_flag = False
+            raise exc
+
         events: List[MessageEvent] = []
         for board in boards:
             board_id = str(board.get("id", "")).strip()
@@ -399,7 +408,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
         self._card_snapshots[work_item_id] = signature
         
-        # Identifikation des Auslösers
         comments = payload["card"]["comments"]
         last_author = comments[-1]["author_id"] if comments else self.runtime.hermes_user_id
 
@@ -876,7 +884,6 @@ def validate_nextcloud_deck_config(config: PlatformConfig) -> bool:
     )
     hermes_user_id = extra.get("hermes_user_id") or os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", "")
 
-    # Sanity-Check
     if "${" in str(base_url) or "$%" in str(base_url):
         return False
 
