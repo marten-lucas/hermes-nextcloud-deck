@@ -85,7 +85,9 @@ class ReminderState:
 
 
 class NextcloudDeckPlatform(BasePlatformAdapter):
-    """Minimal Phase 1 Nextcloud Deck adapter using polling transport."""
+    """Nextcloud Deck adapter using polling transport and Hermes integration."""
+
+    API_VERSION = "v1.0"
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("nextcloud_deck"))
@@ -100,6 +102,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._pending_reminders: Dict[str, ReminderState] = {}
         self._talk_sender: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
         self._time_fn: Callable[[], float] = time.time
+
+    @property
+    def is_connected(self) -> bool:
+        """Dynamic check whether the adapter has an active session and task running."""
+        return bool(
+            self._session
+            and not self._session.closed
+            and not self._stop_event.is_set()
+            and (self._polling_task is not None and not self._polling_task.done())
+        )
 
     @staticmethod
     def _as_float(value: Any, default: float) -> float:
@@ -126,8 +138,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 stack_mapping = entry.get("stack_mapping")
                 if isinstance(stack_mapping, dict):
                     board_stack_mapping[board_id] = stack_mapping
+
+        # Clean base_url trimming trailing slashes and /index.php duplicates
+        raw_base_url = str(extra.get("base_url") or os.getenv("NEXTCLOUD_BASE_URL", "")).rstrip("/")
+        if raw_base_url.endswith("/index.php"):
+            raw_base_url = raw_base_url[:-10].rstrip("/")
+
         return DeckRuntimeConfig(
-            base_url=str(extra.get("base_url") or os.getenv("NEXTCLOUD_BASE_URL", "")).rstrip("/"),
+            base_url=raw_base_url,
             username=str(extra.get("username") or os.getenv("NEXTCLOUD_USERNAME", "")).strip(),
             app_password=str(
                 extra.get("app_password")
@@ -162,36 +180,43 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     def _deck_url(self, path: str) -> str:
         normalized = path.lstrip("/")
-        return f"{self.runtime.base_url}/index.php/apps/deck/api/v1.0/{normalized}"
+        return f"{self.runtime.base_url}/index.php/apps/deck/api/{self.API_VERSION}/{normalized}"
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def _api_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    async def _api_request(
+        self,
+        method: str,
+        path: str,
+        data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         session = await self._ensure_session()
-        async with session.get(self._deck_url(path), params=params, headers=self._api_headers()) as resp:
-            body = await resp.json(content_type=None)
+        req_fn = getattr(session, method.lower())
+        async with req_fn(self._deck_url(path), json=data, params=params, headers=self._api_headers()) as resp:
+            content_type = resp.headers.get("Content-Type", "")
             if resp.status >= 400:
-                raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
+                raw_text = await resp.text()
+                raise RuntimeError(
+                    f"Nextcloud Deck request failed [{resp.status}] for {path}: {raw_text[:300]}"
+                )
+            if "application/json" in content_type:
+                body = await resp.json(content_type=None)
+            else:
+                body = await resp.text()
             return self._unwrap_ocs(body)
+
+    async def _api_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        return await self._api_request("get", path, params=params)
 
     async def _api_post(self, path: str, data: Dict[str, Any]) -> Any:
-        session = await self._ensure_session()
-        async with session.post(self._deck_url(path), json=data, headers=self._api_headers()) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
-            return self._unwrap_ocs(body)
+        return await self._api_request("post", path, data=data)
 
     async def _api_put(self, path: str, data: Dict[str, Any]) -> Any:
-        session = await self._ensure_session()
-        async with session.put(self._deck_url(path), json=data, headers=self._api_headers()) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"Nextcloud Deck request failed for {path}: {resp.status} {body}")
-            return self._unwrap_ocs(body)
+        return await self._api_request("put", path, data=data)
 
     @staticmethod
     def _unwrap_ocs(body: Any) -> Any:
@@ -202,8 +227,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
         self._stop_event.clear()
+        await self._ensure_session()
         await self.poll_once()
         self._start_polling_loop()
+        logger.info(
+            "Nextcloud Deck: Adapter connected and polling active (Interval: %ss)",
+            self.runtime.poll_interval_seconds,
+        )
         return True
 
     async def disconnect(self) -> None:
@@ -216,6 +246,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             await self._session.close()
         self._session = None
         self._mark_disconnected()
+        logger.info("Nextcloud Deck: Adapter disconnected cleanly")
+
+    async def start(self) -> None:
+        """Gateway lifecycle alias for connect."""
+        await self.connect()
+
+    async def stop(self) -> None:
+        """Gateway lifecycle alias for disconnect."""
+        await self.disconnect()
 
     def _start_polling_loop(self) -> None:
         if self._polling_task is not None and not self._polling_task.done():
@@ -248,7 +287,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 continue
             discovered[board_id] = item
         self._discovered_boards = discovered
-        logger.info("Nextcloud Deck discovered %d board(s)", len(discovered))
+        logger.debug("Nextcloud Deck discovered %d board(s)", len(discovered))
         return list(discovered.values())
 
     @property
@@ -387,6 +426,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 continue
             user_id = (
                 entry.get("id")
+                or entry.get("userId")
                 or entry.get("uid")
                 or entry.get("primaryKey")
                 or entry.get("participant", {}).get("uid")
@@ -843,6 +883,34 @@ def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
     return NextcloudDeckPlatform(config)
 
 
+async def standalone_send(
+    pconfig: PlatformConfig,
+    chat_id: str,
+    content: str,
+    *,
+    thread_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    **_: Any,
+) -> Dict[str, Any]:
+    """Standalone send function for out-of-band delivery from Gateway or CLI."""
+    adapter = NextcloudDeckPlatform(pconfig)
+    try:
+        await adapter.connect()
+        result = await adapter.send(chat_id, content, reply_to=thread_id, metadata=metadata)
+        if result.success:
+            return {"success": True, "message_id": result.message_id}
+        return {"error": result.error or "unknown send error"}
+    finally:
+        await adapter.disconnect()
+
+
+def check_is_connected(adapter_or_config: Any) -> bool:
+    """Check adapter instance connection or fall back to configuration validation."""
+    if hasattr(adapter_or_config, "is_connected"):
+        return bool(adapter_or_config.is_connected)
+    return validate_nextcloud_deck_config(adapter_or_config)
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
     ctx.register_platform(
@@ -851,7 +919,7 @@ def register(ctx: Any) -> None:
         adapter_factory=_build_adapter,
         check_fn=nextcloud_deck_deps_present,
         validate_config=validate_nextcloud_deck_config,
-        is_connected=validate_nextcloud_deck_config,
+        is_connected=check_is_connected,
         required_env=[
             "NEXTCLOUD_BASE_URL",
             "NEXTCLOUD_USERNAME",
@@ -861,11 +929,12 @@ def register(ctx: Any) -> None:
         install_hint="pip install aiohttp",
         env_enablement_fn=env_enablement,
         apply_yaml_config_fn=apply_yaml_config,
+        standalone_sender_fn=standalone_send,
         platform_hint=(
             "You are processing Nextcloud Deck work items. "
             "Cards assigned to the Hermes Deck user are the relevant work items."
         ),
         max_message_length=16000,
         emoji="🗂️",
-        allow_update_command=False,
+        allow_update_command=True,
     )
