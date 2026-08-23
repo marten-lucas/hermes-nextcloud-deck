@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote, urljoin
 
 import aiohttp
 
@@ -68,6 +69,7 @@ class DeckRuntimeConfig:
     app_password: str
     hermes_user_id: str
     poll_interval_seconds: float = 30.0
+    debug: bool = False
     board_stack_mapping: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     observed_boards: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
@@ -101,6 +103,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._pending_reminders: Dict[str, ReminderState] = {}
         self._talk_sender: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
         self._time_fn: Callable[[], float] = time.time
+        self._user_groups_cache: Dict[str, List[str]] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -157,6 +160,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             or os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", "")
         ).strip()
 
+        debug_flag = str(
+            extra.get("debug")
+            or os.getenv("NEXTCLOUD_DECK_DEBUG", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
         board_stack_mapping = extra.get("board_stack_mapping") or {}
         if not isinstance(board_stack_mapping, dict):
             board_stack_mapping = {}
@@ -180,6 +188,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             username=username,
             app_password=app_password,
             hermes_user_id=hermes_user_id,
+            debug=debug_flag,
             poll_interval_seconds=max(
                 5.0,
                 self._as_float(
@@ -207,10 +216,72 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         normalized = path.lstrip("/")
         return f"{self.runtime.base_url}/index.php/apps/deck/api/v1.0/{normalized}"
 
+    def _cloud_ocs_url(self, path: str) -> str:
+        return urljoin(f"{self.runtime.base_url}/ocs/v1.php/cloud/", path.lstrip("/"))
+
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
+
+    async def _get_user_groups(self, user_id: str) -> List[str]:
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return []
+
+        if user_id in self._user_groups_cache:
+            return list(self._user_groups_cache[user_id])
+
+        try:
+            session = await self._ensure_session()
+            encoded_user_id = quote(user_id, safe="")
+            path = f"users/{encoded_user_id}/groups"
+            async with session.get(
+                self._cloud_ocs_url(path),
+                params={"format": "json"},
+                headers=self._api_headers(),
+            ) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    body = await resp.json()
+                else:
+                    body = {
+                        "ocs": {
+                            "meta": {
+                                "status": "ok",
+                                "statuscode": resp.status,
+                            },
+                            "data": {},
+                        }
+                    }
+
+            meta = body.get("ocs", {}).get("meta", {})
+            status = str(meta.get("status", "ok")).lower()
+            status_code = int(meta.get("statuscode", 100))
+            if status != "ok" or status_code >= 400:
+                message = meta.get("message", "unknown OCS error")
+                raise RuntimeError(f"Nextcloud OCS request failed for {path}: {status_code} {message}")
+
+            data = self._unwrap_ocs(body)
+
+            groups: List[str] = []
+            if isinstance(data, dict):
+                raw_groups = data.get("groups", [])
+                if isinstance(raw_groups, dict):
+                    raw_groups = raw_groups.get("element", [])
+                if isinstance(raw_groups, list):
+                    groups = [str(g).strip() for g in raw_groups if str(g).strip()]
+                elif raw_groups:
+                    groups = [str(raw_groups).strip()]
+            elif isinstance(data, list):
+                groups = [str(g).strip() for g in data if str(g).strip()]
+
+            self._user_groups_cache[user_id] = groups
+            logger.debug("Nextcloud Deck: groups for user %s: %s", user_id, groups)
+            return list(groups)
+        except Exception as exc:
+            logger.warning("Konnte Gruppen für User %s nicht abfragen: %s", user_id, exc)
+            return []
 
     async def _api_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return await self._api_request("get", path, params=params)
@@ -251,7 +322,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         await self._ensure_session()
         await self.poll_once()
         self._start_polling_loop()
-        logger.info("Nextcloud Deck: Adapter gestartet (Interval: %ss)", self.runtime.poll_interval_seconds)
+        logger.info("Nextcloud Deck: Adapter gestartet (Interval: %ss, Debug: %s)", self.runtime.poll_interval_seconds, self.runtime.debug)
         return True
 
     async def disconnect(self) -> None:
@@ -303,7 +374,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 continue
             discovered[board_id] = item
         self._discovered_boards = discovered
-        logger.info("Nextcloud Deck discovered %d board(s)", len(discovered))
         return list(discovered.values())
 
     @property
@@ -319,46 +389,79 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             raise exc
 
         events: List[MessageEvent] = []
+        total_cards_scanned = 0
+        total_cards_matched = 0
+
         for board in boards:
             board_id = str(board.get("id", "")).strip()
             if self.runtime.observed_boards and board_id not in self.runtime.observed_boards:
                 continue
-            events.extend(await self._ingest_board_once(board))
+            scanned, matched, board_events = await self._ingest_board_once(board)
+            total_cards_scanned += scanned
+            total_cards_matched += matched
+            events.extend(board_events)
+
+        logger.info(
+            "Nextcloud Deck discovered %d board(s) with %d total card(s) (%d matched filter)",
+            len(boards),
+            total_cards_scanned,
+            total_cards_matched,
+        )
+
         await self._process_due_reminders()
         return events
 
-    async def _ingest_board_once(self, board: Dict[str, Any]) -> List[MessageEvent]:
+    async def _ingest_board_once(self, board: Dict[str, Any]) -> tuple[int, int, List[MessageEvent]]:
         board_id = str(board.get("id", "")).strip()
+        board_title = str(board.get("title") or board_id)
         stacks = await self._api_get(f"boards/{board_id}/stacks")
         if not isinstance(stacks, list):
             raise RuntimeError(f"Expected stacks list for board {board_id}, got {type(stacks).__name__}")
         self._board_stack_index[board_id] = self._index_board_stacks(stacks)
+        
         emitted: List[MessageEvent] = []
+        cards_scanned = 0
+        cards_matched = 0
+
         for stack in stacks:
             if not isinstance(stack, dict):
                 continue
             for card in stack.get("cards") or []:
                 if not isinstance(card, dict):
                     continue
-                
+                cards_scanned += 1
                 card_id = str(card.get("id", "")).strip()
+                card_title = str(card.get("title") or card_id)
+
                 comments = await self._api_get(f"cards/{card_id}/comments")
                 if not isinstance(comments, list):
                     comments = []
 
-                if not self._card_should_process(card, comments):
+                if not self._card_should_process(card, comments, board_title):
                     continue
 
+                cards_matched += 1
                 payload = await self._build_card_payload(board, stack, card, comments)
-                event = self._maybe_build_card_event(payload)
+                event = await self._maybe_build_card_event(payload)
                 if event is None:
+                    if self.runtime.debug:
+                        logger.info("Nextcloud Deck: Card '%s' (#%s) matched, but has no new changes (snapshot unchanged)", card_title, card_id)
                     continue
+                
+                if self.runtime.debug:
+                    logger.info("Nextcloud Deck: Emitting event for card '%s' (#%s)", card_title, card_id)
                 await self.handle_message(event)
                 emitted.append(event)
-        return emitted
 
-    def _card_should_process(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
+        return cards_scanned, cards_matched, emitted
+
+    def _card_should_process(self, card: Dict[str, Any], comments: List[Dict[str, Any]], board_title: str) -> bool:
+        card_id = str(card.get("id", "")).strip()
+        card_title = str(card.get("title") or card_id)
+
         if self._card_assigned_to_hermes(card):
+            if self.runtime.debug:
+                logger.info("Nextcloud Deck [MATCH]: Card '%s' (#%s) on '%s' is assigned to Hermes", card_title, card_id, board_title)
             return True
 
         targets = {
@@ -370,12 +473,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         
         desc = str(card.get("description") or "").lower()
         if any(target in desc for target in targets):
+            if self.runtime.debug:
+                logger.info("Nextcloud Deck [MATCH]: Card '%s' (#%s) on '%s' mentions Hermes in description", card_title, card_id, board_title)
             return True
 
         for c in comments:
             msg = str(c.get("message") or "").lower()
             if any(target in msg for target in targets):
+                if self.runtime.debug:
+                    logger.info("Nextcloud Deck [MATCH]: Card '%s' (#%s) on '%s' mentions Hermes in comments", card_title, card_id, board_title)
                 return True
+
+        if self.runtime.debug:
+            logger.info("Nextcloud Deck [SKIP]: Card '%s' (#%s) on '%s' is neither assigned nor mentions Hermes", card_title, card_id, board_title)
 
         return False
 
@@ -435,7 +545,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             self._pending_reminders.pop(work_item_id, None)
         return payload
 
-    def _maybe_build_card_event(self, payload: Dict[str, Any]) -> Optional[MessageEvent]:
+    async def _maybe_build_card_event(self, payload: Dict[str, Any]) -> Optional[MessageEvent]:
         signature = self._payload_signature(payload)
         work_item_id = self._work_item_id(payload)
         if self._card_snapshots.get(work_item_id) == signature:
@@ -444,6 +554,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         
         comments = payload["card"]["comments"]
         last_author = comments[-1]["author_id"] if comments else self.runtime.hermes_user_id
+
+        user_groups = await self._get_user_groups(last_author)
+        groups_header_str = ",".join(user_groups)
+        logger.warning("Deck RBAC Header gesetzt: User=%s, Groups=%s", last_author, groups_header_str)
 
         source = self.build_source(
             chat_id=work_item_id,
@@ -456,16 +570,21 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         try:
             source.extra_headers = {
                 "X-On-Behalf-Of": last_author,
+                "X-User-Groups": groups_header_str,
             }
         except Exception:
-            pass
+            logger.debug("Nextcloud Deck: SessionSource does not allow extra_headers")
 
         text = self._format_card_prompt(payload)
+        
+        event_payload = dict(payload)
+        event_payload["user_groups"] = list(user_groups)
+
         return MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
-            raw_message=payload,
+            raw_message=event_payload,
             message_id=payload["card"]["id"] or None,
             user_id=last_author,
             user_name=last_author,
@@ -1002,6 +1121,7 @@ def apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "app_password": "NEXTCLOUD_DECK_APP_PASSWORD",
         "hermes_user_id": "NEXTCLOUD_DECK_HERMES_USER_ID",
         "poll_interval_seconds": "NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS",
+        "debug": "NEXTCLOUD_DECK_DEBUG",
     }
     for key, env_var in env_map.items():
         if key in platform_cfg and not os.getenv(env_var):
