@@ -440,6 +440,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         emitted: List[MessageEvent] = []
         cards_scanned = 0
         cards_matched = 0
+        active_work_item_ids: set[str] = set()
 
         for stack in stacks:
             if not isinstance(stack, dict):
@@ -449,6 +450,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     continue
                 cards_scanned += 1
                 card_id = str(card.get("id", "")).strip()
+                work_item_id = f"deck:board:{board_id}:card:{card_id}"
+                active_work_item_ids.add(work_item_id)
+
                 comments = await self._fetch_card_comments(card_id)
 
                 if not self._card_should_process(card, comments, board_title):
@@ -460,6 +464,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 if event is not None:
                     await self.handle_message(event)
                     emitted.append(event)
+
+        # Bereinigung gelöschter/entfernter Karten für dieses Board
+        tracked_ids = [
+            wid for wid, data in list(self._work_item_index.items())
+            if data.get("board_id") == board_id
+        ]
+        for wid in tracked_ids:
+            if wid not in active_work_item_ids:
+                logger.info("Nextcloud Deck: Karte %s auf Board %s wurde gelöscht. Bereinige State.", wid, board_id)
+                self._work_item_index.pop(wid, None)
+                self._card_snapshots.pop(wid, None)
+
         return cards_scanned, cards_matched, emitted
 
     def _card_should_process(self, card: Dict[str, Any], comments: List[Dict[str, Any]], board_title: str) -> bool:
@@ -484,7 +500,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         card_id = str(card.get("id", "")).strip()
         description = str(card.get("description") or "")
         
-        # Säuberliche Extraktion der Owner-ID für das spätere UPDATE
         owner_info = card.get("owner")
         owner_id = ""
         if isinstance(owner_info, dict):
@@ -532,7 +547,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         
         comments = payload["card"]["comments"]
         last_author = comments[-1]["author_id"] if comments else self.runtime.hermes_user_id
-        user_groups = await self._get_user_groups(last_author)
 
         source = self.build_source(
             chat_id=work_item_id,
@@ -598,26 +612,33 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return normalized
 
     async def update_card_description(self, work_item_id: str, new_description: str) -> None:
-        """Card UPDATE inklusive Pflichtfeld `owner`."""
+        """Card UPDATE inklusive Pflichtfeld `owner` und 404-Abfangung."""
         work_item = self._require_work_item(work_item_id)
         board_id = int(work_item["board_id"])
         stack_id = int(work_item["stack_id"])
         card_id = int(work_item["card_id"])
 
-        await self._api_put(
-            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}?format=json",
-            {
-                "title": work_item["card_title"],
-                "description": new_description,
-                "type": "plain",
-                "order": work_item.get("order", 0),
-                "owner": work_item.get("owner", self.runtime.username),
-            },
-        )
-        work_item["description"] = new_description
+        try:
+            await self._api_put(
+                f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}?format=json",
+                {
+                    "title": work_item["card_title"],
+                    "description": new_description,
+                    "type": "plain",
+                    "order": work_item.get("order", 0),
+                    "owner": work_item.get("owner", self.runtime.username),
+                },
+            )
+            work_item["description"] = new_description
+        except RuntimeError as exc:
+            if "[404]" in str(exc):
+                logger.warning("Nextcloud Deck: Update fehlgeschlagen, Karte %s existiert nicht mehr.", work_item_id)
+                self._work_item_index.pop(work_item_id, None)
+                self._card_snapshots.pop(work_item_id, None)
+            raise exc
 
     async def move_card_to_status(self, work_item_id: str, status_key: str) -> None:
-        """Card REORDER über den funktionierenden v1.1-Pfad."""
+        """Card REORDER über den funktionierenden v1.1-Pfad mit 404-Abfangung."""
         work_item = self._require_work_item(work_item_id)
         board_id = int(work_item["board_id"])
         current_stack_id = int(work_item["stack_id"])
@@ -631,14 +652,22 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if target_stack_id == current_stack_id:
             return
 
-        await self._api_put(
-            f"boards/{board_id}/stacks/{current_stack_id}/cards/{card_id}/reorder?format=json",
-            {
-                "order": 0,
-                "stackId": target_stack_id,
-            },
-        )
-        work_item["stack_id"] = str(target_stack_id)
+        try:
+            await self._api_put(
+                f"boards/{board_id}/stacks/{current_stack_id}/cards/{card_id}/reorder?format=json",
+                {
+                    "order": 0,
+                    "stackId": target_stack_id,
+                },
+            )
+            work_item["stack_id"] = str(target_stack_id)
+            work_item["order"] = 0
+        except RuntimeError as exc:
+            if "[404]" in str(exc):
+                logger.warning("Nextcloud Deck: Move fehlgeschlagen, Karte %s existiert nicht mehr.", work_item_id)
+                self._work_item_index.pop(work_item_id, None)
+                self._card_snapshots.pop(work_item_id, None)
+            raise exc
 
     async def send(
         self,
