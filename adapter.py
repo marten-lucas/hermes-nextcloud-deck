@@ -589,9 +589,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         for entry in raw_users:
             if not isinstance(entry, dict):
                 continue
-            uid = entry.get("id") or entry.get("userId") or entry.get("uid")
+            participant = entry.get("participant") if isinstance(entry.get("participant"), dict) else {}
+            uid = (
+                participant.get("uid")
+                or participant.get("primaryKey")
+                or entry.get("userId")
+                or (entry.get("uid") if isinstance(entry.get("uid"), str) else None)
+            )
+            name = participant.get("displayname") or uid or ""
             if uid:
-                normalized.append({"id": str(uid), "name": str(entry.get("displayname") or uid)})
+                normalized.append({"id": str(uid), "name": str(name)})
         return normalized
 
     @staticmethod
