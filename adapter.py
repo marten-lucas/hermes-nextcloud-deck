@@ -69,6 +69,7 @@ class DeckRuntimeConfig:
     username: str
     app_password: str
     hermes_user_id: str
+    home_channel: Optional[str] = None
     poll_interval_seconds: float = 30.0
     debug: bool = False
     board_stack_mapping: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -101,6 +102,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             and not self._stop_event.is_set()
             and (self._polling_task is not None and not self._polling_task.done())
         )
+
+    @property
+    def home_channel(self) -> Optional[str]:
+        return self.runtime.home_channel
 
     @staticmethod
     def _as_float(value: Any, default: float) -> float:
@@ -143,6 +148,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             or os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", "")
         ).strip()
 
+        home_channel = str(
+            extra.get("home_channel")
+            or os.getenv("NEXTCLOUD_DECK_HOME_CHANNEL", "")
+            or getattr(config, "home_channel", "")
+        ).strip() or None
+
         debug_flag = str(
             extra.get("debug")
             or os.getenv("NEXTCLOUD_DECK_DEBUG", "")
@@ -171,6 +182,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             username=username,
             app_password=app_password,
             hermes_user_id=hermes_user_id,
+            home_channel=home_channel,
             debug=debug_flag,
             poll_interval_seconds=max(
                 5.0,
@@ -465,7 +477,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     await self.handle_message(event)
                     emitted.append(event)
 
-        # Bereinigung gelöschter/entfernter Karten für dieses Board
         tracked_ids = [
             wid for wid, data in list(self._work_item_index.items())
             if data.get("board_id") == board_id
@@ -543,10 +554,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         work_item_id = self._work_item_id(payload)
         if self._card_snapshots.get(work_item_id) == signature:
             return None
-        self._card_snapshots[work_item_id] = signature
         
         comments = payload["card"]["comments"]
-        last_author = comments[-1]["author_id"] if comments else self.runtime.hermes_user_id
+        last_author = comments[-1]["author_id"] if comments else (payload["card"]["owner"] or self.runtime.hermes_user_id)
+
+        bot_ids = {self.runtime.username.lower(), self.runtime.hermes_user_id.lower(), "ki_assistent", "ki gerda"}
+        if last_author.lower() in bot_ids:
+            self._card_snapshots[work_item_id] = signature
+            return None
+
+        self._card_snapshots[work_item_id] = signature
 
         source = self.build_source(
             chat_id=work_item_id,
@@ -619,7 +636,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return normalized
 
     async def update_card_description(self, work_item_id: str, new_description: str) -> None:
-        """Card UPDATE inklusive Pflichtfeld `owner` und 404-Abfangung."""
         work_item = self._require_work_item(work_item_id)
         board_id = int(work_item["board_id"])
         stack_id = int(work_item["stack_id"])
@@ -645,7 +661,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             raise exc
 
     async def move_card_to_status(self, work_item_id: str, status_key: str) -> None:
-        """Card REORDER über den funktionierenden v1.1-Pfad mit 404-Abfangung."""
         work_item = self._require_work_item(work_item_id)
         board_id = int(work_item["board_id"])
         current_stack_id = int(work_item["stack_id"])
