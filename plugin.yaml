@@ -1,7 +1,7 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.1.12
+version: 0.1.13
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Connects as a regular Nextcloud user, polls Deck boards via the official API,
@@ -26,6 +26,10 @@ requires_env:
     prompt: "Hermes Deck user ID"
     password: false
 optional_env:
+  - name: NEXTCLOUD_DECK_HOME_CHANNEL
+    description: "Default work-item ID used as home channel (e.g. deck:board:12:card:103)"
+    prompt: "Deck home channel work-item ID"
+    password: false
   - name: NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS
     description: "Polling interval in seconds for Deck board discovery (default: 30)"
     prompt: "Deck poll interval in seconds"
