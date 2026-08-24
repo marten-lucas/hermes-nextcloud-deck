@@ -328,8 +328,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 message_node = prop.find("oc:message", ns)
                 if message_node is None or not message_node.text:
                     continue
+                cid = prop.findtext("oc:id", default="", namespaces=ns)
                 comments.append({
-                    "id": prop.findtext("oc:id", default="", namespaces=ns),
+                    "id": cid,
                     "message": message_node.text,
                     "actor": {
                         "id": prop.findtext("oc:actorId", default="", namespaces=ns),
@@ -339,6 +340,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 })
         except Exception:
             pass
+
+        # Aufsteigend nach numerischer ID sortieren (alt -> neu)
+        comments.sort(key=lambda c: int(c["id"]) if str(c.get("id", "")).isdigit() else 0)
         return comments
 
     async def _post_card_comment(self, card_id: str, message: str) -> Optional[str]:
@@ -556,7 +560,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
         
         comments = payload["card"]["comments"]
-        last_author = comments[-1]["author_id"] if comments else (payload["card"]["owner"] or self.runtime.hermes_user_id)
+        last_comment = comments[-1] if comments else None
+        last_author = last_comment["author_id"] if last_comment else (payload["card"]["owner"] or self.runtime.hermes_user_id)
 
         bot_ids = {self.runtime.username.lower(), self.runtime.hermes_user_id.lower(), "ki_assistent", "ki gerda"}
         if last_author.lower() in bot_ids:
@@ -574,8 +579,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             message_id=payload["card"]["id"] or None,
         )
 
+        event_text = f"Nextcloud Deck Karte: {payload['card']['title']}\nBeschreibung:\n{payload['card']['description']}"
+        if last_comment and last_comment.get("message"):
+            event_text += f"\n\nNeuester Kommentar von {last_comment.get('author_name', last_author)}:\n{last_comment['message']}"
+
         return MessageEvent(
-            text=f"Nextcloud Deck Karte: {payload['card']['title']}\nBeschreibung:\n{payload['card']['description']}",
+            text=event_text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=payload,
