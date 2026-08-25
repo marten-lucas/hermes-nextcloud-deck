@@ -1,13 +1,19 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.1.14
+version: 0.1.15
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Connects as a regular Nextcloud user, polls Deck boards via the official API,
   discovers boards visible to the Hermes user across multiple boards, and forms
-  the basis for Deck-backed work item sessions with Talk notification reminders.
+  the basis for Deck-backed work item sessions.
 author: Local Development
+
+skills:
+  - name: nextcloud-deck
+    path: skills/nextcloud-deck/SKILL.md
+    description: Workflows und Befehle zur Verwaltung von Nextcloud Deck Karten, Subtasks, Anhängen und Status-Übergängen
+
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance (e.g. https://cloud.example.org)"
@@ -25,6 +31,7 @@ requires_env:
     description: "Nextcloud Deck user ID that marks cards as assigned to Hermes"
     prompt: "Hermes Deck user ID"
     password: false
+
 optional_env:
   - name: NEXTCLOUD_DECK_HOME_CHANNEL
     description: "Default work-item ID used as home channel (e.g. deck:board:12:card:103)"

@@ -341,7 +341,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         except Exception:
             pass
 
-        # Aufsteigend nach numerischer ID sortieren (alt -> neu)
         comments.sort(key=lambda c: int(c["id"]) if str(c.get("id", "")).isdigit() else 0)
         return comments
 
