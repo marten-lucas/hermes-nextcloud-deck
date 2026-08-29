@@ -7,7 +7,12 @@ Aktueller Stand:
 - Phase 1: Plugin-Skelett und Deck-Authentifizierung
 - Phase 2: Ingestion fuer konfigurierte Boards und Hermes-zugewiesene Karten
 - Phase 3: Deck-Writeback fuer Kommentare, Spaltenwechsel und Checkbox-Updates
-- Phase 4: optionale Talk-Reminder bei ausbleibender menschlicher Reaktion
+
+Deferiert / bewusst nicht Teil des aktuellen Scope:
+
+- Talk-Reminder
+- Board-Onboarding mit automatischem Mapping
+- generische LLM-Mapping-Logik
 
 Weitere Konzept- und Planungsdetails:
 
@@ -22,18 +27,18 @@ Weitere Konzept- und Planungsdetails:
 - verarbeitet nur Boards aus der Konfiguration
 - verarbeitet in diesen Boards nur Karten, die dem konfigurierten Hermes-Deck-User zugewiesen sind
 - uebergibt Karteninhalt, Kommentare und Markdown-Checkboxen als Hermes-Kontext
-- kann spaeter im Lauf:
-  - Kommentare auf Karten schreiben
-  - Karten anhand eines manuellen Status-Mappings in andere Spalten verschieben
-  - Checkboxen in der Beschreibung aktualisieren
-- kann optional einen Talk-Reminder vorbereiten, statt sofort in zwei Kanaele zu posten
+- schreibt Kommentare auf die Karte zurueck
+- verschiebt Karten anhand eines manuellen Status-Mappings in konfigurierten Ziel-Stack
+- aktualisiert Checkboxen in der Kartenbeschreibung
 
-## Was das Plugin heute noch nicht kann
+## Was das Plugin bewusst noch nicht kann
 
 - automatisches Board-Onboarding
 - automatisches Stack-Mapping
 - LLM-gestuetzte Mapping-Vorschlaege
-- vollstaendige Produktions-UX fuer Talk-Reminder
+- Talk-Reminder als eigener Produktiv-Workflow
+
+Der aktuelle Scope ist bewusst auf den Hermes-Plugin-Guide ausgerichtet: ein natives Platform-Plugin mit `plugin.yaml`, `adapter.py` und `register(ctx)`. Zusätzliche Features wie Talk-Reminder oder Onboarding bleiben als separate Verfeinerungsstufen bewusst offen.
 
 ## Konfiguration
 
@@ -81,13 +86,19 @@ cd '/home/marten/Development/kiga AI/hermes-nextcloud-deck'
 python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
-## Entwicklungshinweis
+## Hermes-Plugin-Guide Alignment
 
-Das Plugin ist bewusst nach dem Hermes-Plugin-Guide aufgebaut:
+Das Plugin folgt bewusst dem offiziellen Hermes-Plugin-Pattern fuer native Platform-Adapter:
 
-- `plugin.yaml`
-- `adapter.py`
+- `plugin.yaml` definiert Plugin-Metadaten, `requires_env`/`optional_env` und die Plattform-Registrierung
+- `adapter.py` enthaelt die Adapter-Implementierung und `register(ctx)`
+- `__init__.py` bleibt bewusst leicht und importiert nur den Register-Hook
+- Das Plugin wird als eigenstaendiges Plugin-Verzeichnis in der Hermes-Plugin-Umgebung geladen, ohne Core-Code zu aendern
+
+Aktuell ist der Scope bewusst begrenzt auf das, was in der offiziellen Doku als native platform adapter beschrieben wird. Talk-Reminder und automatisches Board-Onboarding sind nicht Teil dieser Doku-Alignment und werden separat entschieden.
 
 Referenz:
 
 - https://hermes-agent.nousresearch.com/docs/developer-guide/adding-platform-adapters
+- https://hermes-agent.nousresearch.com/docs/developer-guide/plugins
+- https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins
