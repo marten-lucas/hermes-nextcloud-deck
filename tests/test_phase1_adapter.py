@@ -1,7 +1,19 @@
 import os
+import sys
 import unittest
 from types import SimpleNamespace
 
+# Clear any cached gateway imports to ensure adapter uses its fallback classes
+if 'gateway' in sys.modules:
+    del sys.modules['gateway']
+if 'gateway.config' in sys.modules:
+    del sys.modules['gateway.config']
+if 'gateway.platforms' in sys.modules:
+    del sys.modules['gateway.platforms']
+if 'gateway.platforms.base' in sys.modules:
+    del sys.modules['gateway.platforms.base']
+
+# Now import adapter - it will use the fallback classes since gateway is not available
 from adapter import (
     NextcloudDeckPlatform,
     env_enablement,
