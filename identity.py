@@ -40,7 +40,11 @@ class DeckIdentityResolver:
         if is_assigned_to_bot:
             actor_id = self.bot_user_id or "system"
         else:
-            fallback = os.getenv("MCP_IDENTITY_FALLBACK_USER", "").strip() or "system"
+            fallback = (
+                os.getenv("MCP_IDENTITY_FALLBACK_USER", "").strip()
+                or os.getenv("NEXTCLOUD_DECK_USERNAME", "").strip()
+                or "system"
+            )
             actor_id = str(comment_author).strip() if comment_author else fallback
 
         return actor_id, None
@@ -49,5 +53,6 @@ class DeckIdentityResolver:
         try:
             from hermes_x_on_behalf.plugin import set_identity_context  # type: ignore
             set_identity_context(user_id, groups)
+            logger.debug("Identity ContextVar gesetzt: user_id=%s, groups=%s", user_id, groups)
         except ImportError:
-            pass
+            logger.debug("hermes-x-on-behalf nicht installiert; ContextVars-Setzung übersprungen.")

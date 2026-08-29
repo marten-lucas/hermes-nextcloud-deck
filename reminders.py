@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeckReminderScheduler:
-    """Verwaltet Erinnerungen und Patience-Benachrichtigungen für Deck-Karten."""
+    """Verwaltet Erinnerungen für Deck-Karten."""
 
     def __init__(self, client: Any):
         self.client = client

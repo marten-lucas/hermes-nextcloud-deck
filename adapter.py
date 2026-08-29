@@ -4,12 +4,13 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .client import NextcloudDeckClient
 from .identity import DeckIdentityResolver
 from .reminders import DeckReminderScheduler
-from .state import DeckCardSnapshot
+from .state import DeckCardSnapshot, DeckStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ except Exception:
     class SendResult:
         success: bool
         message_id: Optional[str] = None
+        error: Optional[str] = None
 
     @dataclass
     class MessageEvent:
@@ -100,12 +102,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             app_password=app_password,
             hermes_user_id=hermes_user_id,
             poll_interval_seconds=float(
-                extra.get("poll_interval") or os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL", 5.0)
+                extra.get("poll_interval")
+                or os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL")
+                or os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS", 5.0)
             ),
         )
 
         self.client = NextcloudDeckClient(base_url, username, app_password)
         self.identity_resolver = DeckIdentityResolver(bot_user_id=hermes_user_id)
+        self.state_mgr = DeckStateManager()
         self.reminder_scheduler = DeckReminderScheduler(self.client)
 
         self._stop_event = asyncio.Event()
@@ -129,6 +134,35 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         await self.client.close()
         self._mark_disconnected()
 
+    async def send(
+        self,
+        target: str,
+        text: str,
+        reply_to_message_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Pflichtmethode von BasePlatformAdapter: Sendet Kommentare an Deck-Karten."""
+        return await self.send_message(target, text, reply_to_message_id, metadata)
+
+    async def send_message(
+        self,
+        target: str,
+        text: str,
+        reply_to_message_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        card_id = target
+        if ":" in target:
+            parts = target.split(":")
+            if "card" in parts:
+                card_id = parts[parts.index("card") + 1]
+
+        res = await self.client.add_comment(card_id, text)
+        if res:
+            comment_id = str(res.get("id", "")) if isinstance(res, dict) else None
+            return SendResult(success=True, message_id=comment_id)
+        return SendResult(success=False, error="Failed to post comment to Deck card")
+
     async def _polling_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -148,16 +182,44 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             await asyncio.sleep(self.runtime.poll_interval_seconds)
 
     async def _process_card(self, board_id: Any, stack_id: Any, card: Dict[str, Any]) -> None:
-        comments = card.get("comments") or []
+        card_id = str(card.get("id", ""))
+        if not card_id:
+            return
+
+        # Kommentare via REST API abrufen
+        comments = await self.client.get_card_comments(card_id)
         last_comment = comments[-1] if comments else {}
-        last_author = last_comment.get("author") or last_comment.get("actorId")
+        last_comment_id = str(last_comment.get("id", "")) if last_comment else None
+        last_author = str(last_comment.get("author") or last_comment.get("actorId") or "") or None
+
+        assignees = card.get("assignedUsers") or card.get("assignees") or []
+        assigned_uids = []
+        if isinstance(assignees, list):
+            for a in assignees:
+                uid = a.get("uid") if isinstance(a, dict) else str(a)
+                if uid:
+                    assigned_uids.append(str(uid))
+
+        snapshot = DeckCardSnapshot(
+            board_id=str(board_id),
+            stack_id=str(stack_id),
+            card_id=card_id,
+            title=str(card.get("title", "")),
+            description=str(card.get("description", "")),
+            assigned_users=assigned_uids,
+            last_comment_id=last_comment_id,
+            last_author=last_author,
+        )
+
+        # Polling-Dedup: Überspringen, falls keine Änderung vorliegt
+        if not self.state_mgr.should_process(snapshot):
+            return
 
         actor_id, groups = self.identity_resolver.resolve_card_actor(
             card, comment_author=last_author
         )
         self.identity_resolver.set_contextvars_identity(actor_id, groups)
 
-        card_id = str(card.get("id", ""))
         session_key = f"deck:board:{board_id}:card:{card_id}"
 
         source = self.build_source(
@@ -205,6 +267,13 @@ def validate_deck_config(config: PlatformConfig) -> bool:
     return bool(str(base_url).strip() and str(username).strip() and str(app_password).strip())
 
 
+def validate_deck_config_from_env() -> bool:
+    base_url = os.getenv("NEXTCLOUD_DECK_BASE_URL") or os.getenv("NEXTCLOUD_BASE_URL", "")
+    username = os.getenv("NEXTCLOUD_DECK_USERNAME") or os.getenv("NEXTCLOUD_USERNAME", "")
+    app_password = os.getenv("NEXTCLOUD_DECK_APP_PASSWORD") or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
+    return bool(str(base_url).strip() and str(username).strip() and str(app_password).strip())
+
+
 def check_is_connected(adapter_or_config: Any) -> bool:
     if hasattr(adapter_or_config, "is_connected"):
         return bool(adapter_or_config.is_connected)
@@ -221,9 +290,10 @@ def register(ctx: Any) -> None:
         name="nextcloud_deck",
         label="Nextcloud Deck",
         adapter_factory=_build_adapter,
-        check_fn=lambda: True,
+        check_fn=validate_deck_config_from_env,
         validate_config=validate_deck_config,
         is_connected=check_is_connected,
+        env_enablement_fn=validate_deck_config_from_env,
         required_env=[
             "NEXTCLOUD_DECK_BASE_URL",
             "NEXTCLOUD_DECK_USERNAME",
@@ -232,3 +302,15 @@ def register(ctx: Any) -> None:
         max_message_length=16000,
         emoji="🎴",
     )
+
+    # Skills registrieren (pathlib.Path übergibt Objekt, vermeidet AttributeError)
+    skills_dir = Path(__file__).parent / "skills"
+    if skills_dir.exists() and hasattr(ctx, "register_skill"):
+        for child in sorted(skills_dir.iterdir()):
+            skill_md = child / "SKILL.md"
+            if child.is_dir() and skill_md.exists():
+                try:
+                    ctx.register_skill(child.name, skill_md)
+                    logger.info("Skill '%s' registriert aus %s", child.name, skill_md)
+                except Exception as exc:
+                    logger.warning("Fehler beim Registrieren von Skill '%s': %s", child.name, exc)

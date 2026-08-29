@@ -1,104 +1,86 @@
-# Hermes Nextcloud Deck Plugin
+# Nextcloud Deck Platform Adapter for Hermes Agent
 
-Nextcloud Deck Plattform-Plugin fuer Hermes Agent.
+An official platform adapter plugin (`kind: platform`) connecting Nextcloud Deck to **Hermes Agent**.
 
-Aktueller Stand:
+Monitors Deck boards, stacks, and cards; extracts work items; attributes actor identity to assigned users or commenters; and provides writeback capabilities for automated project management.
 
-- Phase 1: Plugin-Skelett und Deck-Authentifizierung
-- Phase 2: Ingestion fuer konfigurierte Boards und Hermes-zugewiesene Karten
-- Phase 3: Deck-Writeback fuer Kommentare, Spaltenwechsel und Checkbox-Updates
+## Features
 
-Deferiert / bewusst nicht Teil des aktuellen Scope:
+- **Identity Propagation**: Dynamically resolves execution identity (`X-On-Behalf-Of` and `ContextVars`). When a card is assigned to Hermes, the bot executes under its own identity; when triggered by card comments, execution context switches to the comment author.
+- **State Tracking & Deduplication**: Utilizes `DeckStateManager` and `DeckCardSnapshot` to track card mutations and prevent redundant executions or infinite polling loops.
+- **Full Writeback Capabilities**: Supports posting comments, reordering/moving cards across stacks, and updating card titles or descriptions directly via `send()` and `NextcloudDeckClient`.
+- **Bundled Collaboration Skill**: Automatically registers the `nextcloud-collaboration` skill rules to enforce identity, permission, and mutation guardrails in LLM sessions.
 
-- Talk-Reminder
-- Board-Onboarding mit automatischem Mapping
-- generische LLM-Mapping-Logik
+## Project Structure
 
-Weitere Konzept- und Planungsdetails:
+```
+hermes-nextcloud-deck/
+├── plugin.yaml               # Plugin manifest & environment definitions
+├── __init__.py               # Package entrypoint
+├── adapter.py                # NextcloudDeckPlatform adapter & registration
+├── client.py                 # OCS REST API client for Nextcloud Deck
+├── identity.py               # Assignee vs. commenter identity resolution
+├── state.py                  # Snapshot state tracking & polling deduplication
+├── reminders.py              # Card reminder dispatching
+├── skills/
+│   └── nextcloud-collaboration/
+│       └── SKILL.md          # LLM collaboration & identity guardrails
+└── tests/
+    └── test_phase1_adapter.py # Unit test suite
+```
 
-- [Anforderungen](</home/marten/Development/kiga AI/hermes-nextcloud-deck/docs/requirements.md>)
-- [MVP-Plan](</home/marten/Development/kiga AI/hermes-nextcloud-deck/docs/mvp-plan.md>)
-- [User Manual](</home/marten/Development/kiga AI/hermes-nextcloud-deck/docs/user-manual.md>)
+## Configuration
 
-## Was das Plugin heute kann
+### Environment Variables
 
-- verbindet sich als normaler Nextcloud-User mit Deck
-- pollt die sichtbaren Boards des Users
-- verarbeitet nur Boards aus der Konfiguration
-- verarbeitet in diesen Boards nur Karten, die dem konfigurierten Hermes-Deck-User zugewiesen sind
-- uebergibt Karteninhalt, Kommentare und Markdown-Checkboxen als Hermes-Kontext
-- schreibt Kommentare auf die Karte zurueck
-- verschiebt Karten anhand eines manuellen Status-Mappings in konfigurierten Ziel-Stack
-- aktualisiert Checkboxen in der Kartenbeschreibung
+Configure the following environment variables in your environment or `.env` file:
 
-## Was das Plugin bewusst noch nicht kann
+| Variable | Required | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `NEXTCLOUD_DECK_BASE_URL` | Yes | Base URL of your Nextcloud instance (e.g. `https://cloud.example.org`) | - |
+| `NEXTCLOUD_DECK_USERNAME` | Yes | Username of the Nextcloud bot account | - |
+| `NEXTCLOUD_DECK_APP_PASSWORD` | Yes | App password for authentication | - |
+| `NEXTCLOUD_DECK_HERMES_USER_ID` | No | Bot User ID in Nextcloud | Same as username |
+| `NEXTCLOUD_DECK_POLL_INTERVAL` | No | Polling frequency in seconds | `5.0` |
 
-- automatisches Board-Onboarding
-- automatisches Stack-Mapping
-- LLM-gestuetzte Mapping-Vorschlaege
-- Talk-Reminder als eigener Produktiv-Workflow
+### Hermes Gateway Configuration
 
-Der aktuelle Scope ist bewusst auf den Hermes-Plugin-Guide ausgerichtet: ein natives Platform-Plugin mit `plugin.yaml`, `adapter.py` und `register(ctx)`. Zusätzliche Features wie Talk-Reminder oder Onboarding bleiben als separate Verfeinerungsstufen bewusst offen.
-
-## Konfiguration
-
-Pflichtvariablen:
-
-- `NEXTCLOUD_BASE_URL`
-- `NEXTCLOUD_USERNAME`
-- `NEXTCLOUD_APP_PASSWORD`
-- `NEXTCLOUD_DECK_HERMES_USER_ID`
-
-Optional:
-
-- `NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS`
-
-Beispiel fuer `config.yaml`:
+Add the platform entry under the `gateway.platforms` section in `~/.hermes/config.yaml`:
 
 ```yaml
-platforms:
-  nextcloud_deck:
-    enabled: true
-    extra:
-      base_url: "https://cloud.example.org"
+gateway:
+  platforms:
+    nextcloud_deck:
+      base_url: "[https://cloud.example.org](https://cloud.example.org)"
       username: "hermes"
-      app_password: "app-password"
-      hermes_user_id: "hermes-user"
-      poll_interval_seconds: 30
-      boards:
-        - board_id: "7"
-          stack_mapping:
-            todo: "Backlog"
-            in_progress: "In Arbeit"
-            blocked: "Blockiert"
-            done: "Erledigt"
-          reminder_via_talk: false
-          talk_room_id: ""
-          patience: "medium"
+      app_password: "YOUR_APP_PASSWORD"
+      hermes_user_id: "hermes"
+      poll_interval: 5.0
 ```
 
-## Lokale Tests
+## Installation & Verification
 
-Die aktuelle Test-Suite:
+1. Place or clone this repository into your Hermes plugins directory:
+   ```bash
+   cd ~/.hermes/plugins/
+   git clone [https://github.com/marten-lucas/hermes-nextcloud-deck.git](https://github.com/marten-lucas/hermes-nextcloud-deck.git) nextcloud-deck-platform
+   ```
 
-```bash
-cd '/home/marten/Development/kiga AI/hermes-nextcloud-deck'
-python -m unittest discover -s tests -p 'test*.py' -v
-```
+2. Verify plugin manifest and runtime discovery:
+   ```bash
+   hermes plugins doctor nextcloud-deck-platform
+   ```
 
-## Hermes-Plugin-Guide Alignment
+3. Inspect the bundled skill:
+   ```bash
+   hermes skills inspect nextcloud-collaboration
+   ```
 
-Das Plugin folgt bewusst dem offiziellen Hermes-Plugin-Pattern fuer native Platform-Adapter:
+4. Run unit tests:
+   ```bash
+   python -m unittest discover -s tests
+   ```
 
-- `plugin.yaml` definiert Plugin-Metadaten, `requires_env`/`optional_env` und die Plattform-Registrierung
-- `adapter.py` enthaelt die Adapter-Implementierung und `register(ctx)`
-- `__init__.py` bleibt bewusst leicht und importiert nur den Register-Hook
-- Das Plugin wird als eigenstaendiges Plugin-Verzeichnis in der Hermes-Plugin-Umgebung geladen, ohne Core-Code zu aendern
+## License
 
-Aktuell ist der Scope bewusst begrenzt auf das, was in der offiziellen Doku als native platform adapter beschrieben wird. Talk-Reminder und automatisches Board-Onboarding sind nicht Teil dieser Doku-Alignment und werden separat entschieden.
-
-Referenz:
-
-- https://hermes-agent.nousresearch.com/docs/developer-guide/adding-platform-adapters
-- https://hermes-agent.nousresearch.com/docs/developer-guide/plugins
-- https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins
+MIT License. See `LICENSE` for details.

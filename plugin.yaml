@@ -1,12 +1,14 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.2.2
+version: 0.2.3
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Monitors Deck boards, stacks, and cards; extracts work items, tasks, and comments;
   propagates identity (assignee vs. commenter) and synchronizes status updates.
 author: Local Development
+provides_skills:
+  - nextcloud-collaboration
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of Nextcloud instance (e.g. https://cloud.example.org)"
