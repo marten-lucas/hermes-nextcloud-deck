@@ -1,48 +1,33 @@
-name: nextcloud_deck
+name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.1.16
+version: 0.2.0
 description: >
-  Native Hermes platform adapter for Nextcloud Deck.
-  This implementation follows the official Hermes plugin pattern for platform
-  adapters: plugin metadata is declared in plugin.yaml, the platform is registered
-  via register(ctx), and the runtime logic lives in adapter.py.
-  The current scope intentionally excludes talk reminder and automated onboarding.
+  Nextcloud Deck platform adapter for Hermes Agent.
+  Monitors Deck boards, stacks, and cards; extracts work items, tasks, and comments;
+  propagates identity (assignee vs. commenter) and synchronizes status updates.
 author: Local Development
-
-skills:
-  - name: nextcloud-deck
-    path: skills/nextcloud-deck/SKILL.md
-    description: Workflows und Befehle zur Verwaltung von Nextcloud Deck Karten, Subtasks, Anhängen und Status-Übergängen
-
+provides_skills:
+  - nextcloud-collaboration
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
-    description: "Base URL of the Nextcloud instance (e.g. https://cloud.example.org)"
-    prompt: "Nextcloud Deck base URL"
+    description: "Base URL of Nextcloud instance (e.g. https://cloud.example.org)"
+    prompt: "Nextcloud base URL"
     password: false
   - name: NEXTCLOUD_DECK_USERNAME
-    description: "Nextcloud username used by the Hermes Deck adapter"
+    description: "Nextcloud Deck account username"
     prompt: "Nextcloud Deck username"
     password: false
   - name: NEXTCLOUD_DECK_APP_PASSWORD
-    description: "Nextcloud app password for the Hermes Deck adapter"
+    description: "App password for Nextcloud Deck"
     prompt: "Nextcloud Deck app password"
     password: true
-  - name: NEXTCLOUD_DECK_HERMES_USER_ID
-    description: "Nextcloud Deck user ID that marks cards as assigned to Hermes"
-    prompt: "Hermes Deck user ID"
-    password: false
-
 optional_env:
-  - name: NEXTCLOUD_DECK_HOME_CHANNEL
-    description: "Default work-item ID used as home channel (e.g. deck:board:12:card:103)"
-    prompt: "Deck home channel work-item ID"
+  - name: NEXTCLOUD_DECK_HERMES_USER_ID
+    description: "User ID of the Hermes Bot in Nextcloud (defaults to username)"
+    prompt: "Hermes Bot User ID"
     password: false
-  - name: NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS
-    description: "Polling interval in seconds for Deck board discovery (default: 30)"
-    prompt: "Deck poll interval in seconds"
-    password: false
-  - name: NEXTCLOUD_DECK_DEBUG
-    description: "Enable extensive logging for card ingestion and filtering matching (true/false)"
-    prompt: "Enable Deck debug logging"
+  - name: NEXTCLOUD_DECK_POLL_INTERVAL
+    description: "Polling interval for card updates in seconds (default: 5)"
+    prompt: "Polling interval"
     password: false

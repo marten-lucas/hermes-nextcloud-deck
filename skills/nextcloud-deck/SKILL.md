@@ -1,44 +1,22 @@
----
-name: nextcloud-deck
-description: Workflows und Anweisungen für Hermes Agent zur Verwaltung von Nextcloud Deck Karten, Subtasks, Anhängen und Status-Übergängen.
----
+# Nextcloud Collaboration & Identity Guardrails
 
-# Nextcloud Deck Agent Workflow
+When working through Nextcloud Talk or Deck:
 
-Dieser Skill definiert die Standards für die Interaktion mit Nextcloud Deck Boards und Karten über die Plattform `deck`.
-
----
-
-## 1. Status-Steuerung & Reorder
-Verwende beim Senden von Antworten das Metadaten-Feld `target_status`, um den Status einer Karte auf dem Board automatisch anzupassen. Der Adapter löst diese Schlüssel über die `config.yaml` auf die korrekten Stack-IDs auf:
-* `backlog`: Aufgabe zurückstellen oder für spätere Planung parken.
-* `todo`: Bereit zur Bearbeitung durch ein Teammitglied oder den Agenten.
-* `in_progress`: Aktuell in aktiver Bearbeitung.
-* `review`: Wartet auf Abnahme oder Rückmeldung durch den Vorstand (z. B. Marten).
-* `done`: Aufgabe vollständig abgeschlossen.
-
----
-
-## 2. Umgang mit Subtasks (Checklisten in der Beschreibung)
-Subtasks werden innerhalb der Kartenbeschreibung als Markdown-Tasklisten geführt:
-
-- [ ] Task 1: Rechner-Setup ausführen
-- [x] Task 2: Logs analysieren
-
-**Regeln für Subtasks:**
-* **Fortschritt aktualisieren:** Wenn du einen Teilaspekt der Aufgabe erledigt hast, aktualisiere die Beschreibung der Karte über das Metadaten-Feld `new_description` (oder `description`), indem du die entsprechende Zeile von `- [ ]` auf `- [x]` setzt.
-* **Neue Teilaufgaben ergänzen:** Wenn während der Bearbeitung neue Teilschritte entstehen, füge sie als neue Checkbox-Zeilen `- [ ]` am Ende der Aufgabenliste in der Beschreibung hinzu.
-* **Transparenz:** Erwähne abgehakte Teilschritte kurz im Antwort-Kommentar.
-
----
-
-## 3. Verknüpfung von Anhängen im Kommentar
-* Referenziere hochgeladene oder generierte Dateien direkt als Markdown-Links im Kommentar-Text (z. B. `[Anhang: Bericht.pdf](https://next.cloud.kiga-gramschatz.de/f/12345)`).
-* Beziehe dich in deinen Antworten explizit auf existierende Karten-Anhänge oder übermittelte Dokumente.
-
----
-
-## 4. Antwort-Struktur & Kommunikationsstil
-* **Direkt & Präzise:** Halte Kommentare auf Deck-Karten kurz und übersichtlich. Nutze Bullet Points für Statusberichte.
-* **Anrede:** Sprich Ansprechpartner persönlich mit Vornamen an (z. B. Marten).
-* **Fehler-Handling:** Falls Server-Checks oder Tool-Executions fehlschlagen, dokumentiere die konkrete Ursache transparent im Kommentar und gib Handlungsoptionen an.
+1. Treat the current Hermes session identity as authoritative.
+2. Never ask the user to provide their Nextcloud user ID for authorization.
+3. Never put X-On-Behalf-Of or X-User-Groups into tool arguments.
+4. Downstream authorization (MCP / APIs) is determined purely by the runtime identity propagated by Hermes.
+5. Use the current user's permissions rather than the Hermes bot's administrative permissions.
+6. When an MCP tool is unavailable due to RBAC, do not attempt to bypass authorization by changing tool arguments or guessing another user.
+7. When working with Deck:
+   - Identify the current work item/card first.
+   - Preserve existing card content.
+   - Use explicit status mappings.
+   - Do not overwrite unrelated description content.
+8. When modifying a Deck card, prefer the smallest possible mutation.
+9. When adding a comment, clearly distinguish agent-generated content from user-authored content.
+10. For persistent memory:
+    - Use Honcho for user-specific preferences and long-lived context.
+    - Do not store secrets, credentials, access tokens, or authorization headers.
+    - Never use another user's memory to answer the current user's request.
+11. If the current identity is ambiguous, do not guess. Ask for clarification.
