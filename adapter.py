@@ -7,10 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .client import NextcloudDeckClient
-from .identity import DeckIdentityResolver
-from .reminders import DeckReminderScheduler
-from .state import DeckCardSnapshot, DeckStateManager
+try:
+    from .client import NextcloudDeckClient
+    from .identity import DeckIdentityResolver
+    from .reminders import DeckReminderScheduler
+    from .state import DeckCardSnapshot, DeckStateManager
+except ImportError:  # pragma: no cover - direkter/Test-Import ohne Package-Kontext
+    from client import NextcloudDeckClient
+    from identity import DeckIdentityResolver
+    from reminders import DeckReminderScheduler
+    from state import DeckCardSnapshot, DeckStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +251,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
 
 def validate_deck_config(config: PlatformConfig) -> bool:
+    """Check-Funktion zur Validierung eines bestehenden Configuration-Objekts."""
     extra = getattr(config, "extra", {}) or {}
     base_url = (
         extra.get("base_url")
@@ -266,10 +273,27 @@ def validate_deck_config(config: PlatformConfig) -> bool:
 
 
 def validate_deck_config_from_env() -> bool:
+    """Passive Probe für check_fn (gibt bool zurück)."""
     base_url = os.getenv("NEXTCLOUD_DECK_BASE_URL") or os.getenv("NEXTCLOUD_BASE_URL", "")
     username = os.getenv("NEXTCLOUD_DECK_USERNAME") or os.getenv("NEXTCLOUD_USERNAME", "")
     app_password = os.getenv("NEXTCLOUD_DECK_APP_PASSWORD") or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
     return bool(str(base_url).strip() and str(username).strip() and str(app_password).strip())
+
+
+def env_enablement() -> Optional[Dict[str, Any]]:
+    """Erforderliche env_enablement_fn für Hermes: Gibt None oder ein dict mit Seed-Extras zurück."""
+    base_url = os.getenv("NEXTCLOUD_DECK_BASE_URL") or os.getenv("NEXTCLOUD_BASE_URL", "")
+    username = os.getenv("NEXTCLOUD_DECK_USERNAME") or os.getenv("NEXTCLOUD_USERNAME", "")
+    app_password = os.getenv("NEXTCLOUD_DECK_APP_PASSWORD") or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
+    if not (base_url and username and app_password):
+        return None
+    return {
+        "base_url": base_url,
+        "username": username,
+        "app_password": app_password,
+        "hermes_user_id": os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", username),
+        "poll_interval": float(os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL", 5.0)),
+    }
 
 
 def check_is_connected(adapter_or_config: Any) -> bool:
@@ -291,7 +315,7 @@ def register(ctx: Any) -> None:
         check_fn=validate_deck_config_from_env,
         validate_config=validate_deck_config,
         is_connected=check_is_connected,
-        env_enablement_fn=validate_deck_config_from_env,
+        env_enablement_fn=env_enablement,
         required_env=[
             "NEXTCLOUD_DECK_BASE_URL",
             "NEXTCLOUD_DECK_USERNAME",

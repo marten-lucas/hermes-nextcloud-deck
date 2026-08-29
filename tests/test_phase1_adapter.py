@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from identity import DeckIdentityResolver
 from state import DeckCardSnapshot, DeckStateManager
-from adapter import NextcloudDeckPlatform, validate_deck_config_from_env
+from adapter import NextcloudDeckPlatform, env_enablement, validate_deck_config_from_env
 
 
 class TestNextcloudDeckPlatform(unittest.TestCase):
@@ -36,6 +36,17 @@ class TestNextcloudDeckPlatform(unittest.TestCase):
         os.environ["NEXTCLOUD_DECK_USERNAME"] = "hermes"
         os.environ["NEXTCLOUD_DECK_APP_PASSWORD"] = "secret"
         self.assertTrue(validate_deck_config_from_env())
+
+    def test_env_enablement_contract(self):
+        os.environ["NEXTCLOUD_DECK_BASE_URL"] = "https://cloud.example.org"
+        os.environ["NEXTCLOUD_DECK_USERNAME"] = "hermes"
+        os.environ["NEXTCLOUD_DECK_APP_PASSWORD"] = "secret"
+        res = env_enablement()
+        self.assertIsInstance(res, dict)
+        self.assertEqual(res.get("base_url"), "https://cloud.example.org")
+
+        os.environ.pop("NEXTCLOUD_DECK_BASE_URL", None)
+        self.assertIsNone(env_enablement())
 
 
 if __name__ == "__main__":

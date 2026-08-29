@@ -8,7 +8,7 @@ Monitors Deck boards, stacks, and cards; extracts work items; attributes actor i
 
 - **Identity Propagation**: Dynamically resolves execution identity (`X-On-Behalf-Of` and `ContextVars`). When a card is assigned to Hermes, the bot executes under its own identity; when triggered by card comments, execution context switches to the comment author.
 - **State Tracking & Deduplication**: Utilizes `DeckStateManager` and `DeckCardSnapshot` to track card mutations and prevent redundant executions or infinite polling loops.
-- **Full Writeback Capabilities**: Supports posting comments, reordering/moving cards across stacks, and updating card titles or descriptions directly via `send()` and `NextcloudDeckClient`.
+- **Full Writeback Capabilities**: Supports posting comments via `send()`, as well as reordering/moving cards across stacks and updating card titles or descriptions via `NextcloudDeckClient`.
 - **Bundled Collaboration Skill**: Automatically registers the `nextcloud-collaboration` skill rules to enforce identity, permission, and mutation guardrails in LLM sessions.
 
 ## Project Structure
@@ -51,11 +51,13 @@ Add the platform entry under the `gateway.platforms` section in `~/.hermes/confi
 gateway:
   platforms:
     nextcloud_deck:
-      base_url: "[https://cloud.example.org](https://cloud.example.org)"
-      username: "hermes"
-      app_password: "YOUR_APP_PASSWORD"
-      hermes_user_id: "hermes"
-      poll_interval: 5.0
+      enabled: true
+      extra:
+        base_url: "[https://cloud.example.org](https://cloud.example.org)"
+        username: "hermes"
+        app_password: "YOUR_APP_PASSWORD"
+        hermes_user_id: "hermes"
+        poll_interval: 5.0
 ```
 
 ## Installation & Verification
@@ -71,14 +73,9 @@ gateway:
    hermes plugins doctor nextcloud-deck-platform
    ```
 
-3. Inspect the bundled skill:
+3. Run unit tests directly via standard discovery:
    ```bash
-   hermes skills inspect nextcloud-collaboration
-   ```
-
-4. Run unit tests:
-   ```bash
-   python -m unittest discover -s tests
+   python -m unittest discover -s tests -p 'test*.py' -v
    ```
 
 ## License
