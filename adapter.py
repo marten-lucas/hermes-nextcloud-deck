@@ -232,9 +232,3 @@ def register(ctx: Any) -> None:
         max_message_length=16000,
         emoji="🎴",
     )
-
-    # Registrierung des mitgelieferten Skills
-    skill_path = os.path.join(os.path.dirname(__file__), "skills", "nextcloud-collaboration")
-    if hasattr(ctx, "register_skill") and os.path.exists(skill_path):
-        ctx.register_skill("nextcloud-collaboration", skill_path)
-        logger.info("[Nextcloud Deck] Skill 'nextcloud-collaboration' registriert.")
