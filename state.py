@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class DeckCardSnapshot:
     board_id: str
     stack_id: str
@@ -14,33 +16,40 @@ class DeckCardSnapshot:
     assigned_users: List[str] = field(default_factory=list)
     last_comment_id: Optional[str] = None
     last_author: Optional[str] = None
+    due_date: Optional[str] = None
+    done: object = None
 
-    def has_changed(self, other: DeckCardSnapshot) -> bool:
-        return (
-            self.title != other.title
-            or self.description != other.description
-            or set(self.assigned_users) != set(other.assigned_users)
-            or self.last_comment_id != other.last_comment_id
-            or self.stack_id != other.stack_id
-        )
+    def fingerprint(self) -> str:
+        payload = {
+            "board_id": self.board_id,
+            "stack_id": self.stack_id,
+            "card_id": self.card_id,
+            "title": self.title,
+            "description": self.description,
+            "assigned_users": sorted(self.assigned_users),
+            "last_comment_id": self.last_comment_id,
+            "last_author": self.last_author,
+            "due_date": self.due_date,
+            "done": self.done,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode()
+        ).hexdigest()
 
 
 class DeckStateManager:
-    """Verhindert doppelte Ausführungen und Endlosschleifen im Polling-Loop."""
+    """In-memory deduplication for one adapter process."""
 
     def __init__(self) -> None:
-        self._snapshots: Dict[str, DeckCardSnapshot] = {}
+        self._fingerprints: Dict[str, str] = {}
 
     def should_process(self, snapshot: DeckCardSnapshot) -> bool:
         key = f"{snapshot.board_id}:{snapshot.card_id}"
-        previous = self._snapshots.get(key)
+        fingerprint = snapshot.fingerprint()
+        if self._fingerprints.get(key) == fingerprint:
+            return False
+        self._fingerprints[key] = fingerprint
+        return True
 
-        if previous is None:
-            self._snapshots[key] = snapshot
-            return True
-
-        if previous.has_changed(snapshot):
-            self._snapshots[key] = snapshot
-            return True
-
-        return False
+    def forget(self, board_id: str, card_id: str) -> None:
+        self._fingerprints.pop(f"{board_id}:{card_id}", None)

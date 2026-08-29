@@ -8,17 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from .client import NextcloudDeckClient
+    from .client import NextcloudDeckClient, NextcloudDeckError
     from .identity import DeckIdentityResolver
-    from .reminders import DeckReminderScheduler
     from .state import DeckCardSnapshot, DeckStateManager
-except ImportError:  # pragma: no cover - direkter/Test-Import ohne Package-Kontext
-    from client import NextcloudDeckClient
+except ImportError:  # direct test/import
+    from client import NextcloudDeckClient, NextcloudDeckError
     from identity import DeckIdentityResolver
-    from reminders import DeckReminderScheduler
     from state import DeckCardSnapshot, DeckStateManager
-
-logger = logging.getLogger(__name__)
 
 try:
     from gateway.config import Platform, PlatformConfig  # type: ignore
@@ -28,7 +24,7 @@ try:
         MessageType,
         SendResult,
     )
-except Exception:
+except Exception:  # local test fallback
     Platform = lambda name: name  # type: ignore
     PlatformConfig = Any  # type: ignore
 
@@ -49,6 +45,7 @@ except Exception:
         raw_message: Dict[str, Any]
         message_id: Optional[str] = None
         user_id: Optional[str] = None
+        user_name: Optional[str] = None
 
     class BasePlatformAdapter:
         def __init__(self, config: Any, platform: str = "nextcloud_deck") -> None:
@@ -59,10 +56,13 @@ except Exception:
             return kwargs
 
         async def handle_message(self, event: MessageEvent) -> None:
-            pass
+            return None
 
         def _mark_disconnected(self) -> None:
-            pass
+            return None
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,83 +72,143 @@ class DeckRuntimeConfig:
     app_password: str
     hermes_user_id: str
     poll_interval_seconds: float
+    boards: Dict[str, Dict[str, Any]]
+
+
+def _env(name: str, *fallbacks: str) -> str:
+    for key in (name, *fallbacks):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
+    extra = getattr(config, "extra", {}) or {}
+    base_url = str(
+        extra.get("base_url")
+        or extra.get("deck_base_url")
+        or _env("NEXTCLOUD_DECK_BASE_URL", "NEXTCLOUD_BASE_URL")
+    ).strip().rstrip("/")
+    if base_url.endswith("/index.php"):
+        base_url = base_url[:-10]
+
+    username = str(
+        extra.get("username")
+        or extra.get("deck_username")
+        or _env("NEXTCLOUD_DECK_USERNAME", "NEXTCLOUD_USERNAME")
+    ).strip()
+
+    app_password = str(
+        extra.get("app_password")
+        or extra.get("deck_app_password")
+        or getattr(config, "token", "")
+        or _env("NEXTCLOUD_DECK_APP_PASSWORD", "NEXTCLOUD_APP_PASSWORD")
+    ).strip()
+
+    hermes_user_id = str(
+        extra.get("hermes_user_id")
+        or _env("NEXTCLOUD_DECK_HERMES_USER_ID", "NEXTCLOUD_HERMES_USER_ID")
+        or username
+    ).strip()
+
+    try:
+        poll = float(
+            extra.get("poll_interval_seconds")
+            or extra.get("poll_interval")
+            or _env("NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS", "NEXTCLOUD_DECK_POLL_INTERVAL")
+            or 30
+        )
+    except (TypeError, ValueError):
+        poll = 30.0
+
+    boards: Dict[str, Dict[str, Any]] = {}
+    raw_boards = extra.get("boards") or []
+    if isinstance(raw_boards, list):
+        for item in raw_boards:
+            if not isinstance(item, dict):
+                continue
+            board_id = str(item.get("board_id") or item.get("id") or "").strip()
+            if board_id:
+                boards[board_id] = dict(item)
+
+    return DeckRuntimeConfig(
+        base_url=base_url,
+        username=username,
+        app_password=app_password,
+        hermes_user_id=hermes_user_id,
+        poll_interval_seconds=max(5.0, poll),
+        boards=boards,
+    )
 
 
 class NextcloudDeckPlatform(BasePlatformAdapter):
-    """Refactored Nextcloud Deck Platform Adapter."""
+    """Polling platform adapter for explicitly configured Nextcloud Deck boards."""
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("nextcloud_deck"))
-        extra = getattr(config, "extra", {}) or {}
-
-        base_url = str(
-            extra.get("base_url")
-            or os.getenv("NEXTCLOUD_DECK_BASE_URL")
-            or os.getenv("NEXTCLOUD_BASE_URL", "")
-        ).rstrip("/")
-        username = str(
-            extra.get("username")
-            or os.getenv("NEXTCLOUD_DECK_USERNAME")
-            or os.getenv("NEXTCLOUD_USERNAME", "")
+        self.runtime = _build_runtime_config(config)
+        self.client = NextcloudDeckClient(
+            self.runtime.base_url,
+            self.runtime.username,
+            self.runtime.app_password,
         )
-        app_password = str(
-            extra.get("app_password")
-            or getattr(config, "token", "")
-            or os.getenv("NEXTCLOUD_DECK_APP_PASSWORD")
-            or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
-        )
-        hermes_user_id = str(
-            extra.get("hermes_user_id")
-            or os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", username)
-        ).strip()
-
-        self.runtime = DeckRuntimeConfig(
-            base_url=base_url,
-            username=username,
-            app_password=app_password,
-            hermes_user_id=hermes_user_id,
-            poll_interval_seconds=float(
-                extra.get("poll_interval")
-                or os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL")
-                or os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS", 5.0)
-            ),
-        )
-
-        self.client = NextcloudDeckClient(base_url, username, app_password)
-        self.identity_resolver = DeckIdentityResolver(bot_user_id=hermes_user_id)
-        self.state_mgr = DeckStateManager()
-        self.reminder_scheduler = DeckReminderScheduler(self.client)
-
+        self.identity = DeckIdentityResolver(self.runtime.hermes_user_id)
+        self.state = DeckStateManager()
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
+        self._connected = False
 
     @property
     def is_connected(self) -> bool:
-        return not self._stop_event.is_set()
+        return (
+            self._connected
+            and not self._stop_event.is_set()
+            and self._polling_task is not None
+            and not self._polling_task.done()
+        )
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        del is_reconnect
         self._stop_event.clear()
         await self.client.ensure_session()
-        self._polling_task = asyncio.create_task(self._polling_loop())
-        logger.info("Nextcloud Deck: Platform Adapter verbunden.")
+        # Fail fast on credentials/network errors instead of reporting a false connection.
+        await self.client.get_boards()
+        self._connected = True
+        if self._polling_task is None or self._polling_task.done():
+            self._polling_task = asyncio.create_task(self._polling_loop())
         return True
 
     async def disconnect(self) -> None:
         self._stop_event.set()
-        if self._polling_task:
-            self._polling_task.cancel()
+        self._connected = False
+        task = self._polling_task
+        self._polling_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await self.client.close()
         self._mark_disconnected()
 
     async def send(
         self,
         target: str,
-        text: str,
-        reply_to_message_id: Optional[str] = None,
+        content: str,
+        reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Pflichtmethode von BasePlatformAdapter: Sendet Kommentare an Deck-Karten."""
-        return await self.send_message(target, text, reply_to_message_id, metadata)
+        del reply_to, metadata
+        card_id = self._card_id_from_target(target)
+        try:
+            result = await self.client.add_comment(card_id, content)
+        except NextcloudDeckError as exc:
+            logger.warning("Deck comment write failed for card %s: %s", card_id, exc)
+            return SendResult(success=False, error=str(exc))
+        return SendResult(
+            success=result is not None,
+            message_id=str(result.get("id")) if isinstance(result, dict) and result.get("id") else None,
+            error=None if result is not None else "Deck did not return a comment",
+        )
 
     async def send_message(
         self,
@@ -157,142 +217,194 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         reply_to_message_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        card_id = target
-        if ":" in target:
-            parts = target.split(":")
-            if "card" in parts:
-                card_id = parts[parts.index("card") + 1]
+        return await self.send(target, text, reply_to_message_id, metadata)
 
-        res = await self.client.add_comment(card_id, text)
-        if res:
-            comment_id = str(res.get("id", "")) if isinstance(res, dict) else None
-            return SendResult(success=True, message_id=comment_id)
-        return SendResult(success=False, error="Failed to post comment to Deck card")
+    @staticmethod
+    def _card_id_from_target(target: str) -> str:
+        parts = str(target).split(":")
+        if "card" in parts:
+            idx = parts.index("card")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        return str(target).strip()
 
-    async def _polling_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                boards = await self.client.get_boards()
-                for board in boards:
-                    board_id = board.get("id")
-                    if board_id:
-                        stacks = await self.client.get_stacks(board_id)
-                        for stack in stacks:
-                            cards = stack.get("cards", [])
-                            for card in cards:
-                                await self._process_card(board_id, stack.get("id"), card)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("Nextcloud Deck Polling Fehler: %s", exc)
-            await asyncio.sleep(self.runtime.poll_interval_seconds)
+    def _configured_board(self, board_id: str) -> Optional[Dict[str, Any]]:
+        if not self.runtime.boards:
+            return None
+        return self.runtime.boards.get(board_id)
 
-    async def _process_card(self, board_id: Any, stack_id: Any, card: Dict[str, Any]) -> None:
-        card_id = str(card.get("id", ""))
-        if not card_id:
+    def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
+        assigned = set(self.identity.assigned_uids(card))
+        if self.runtime.hermes_user_id in assigned:
+            return True
+
+        # Explicit @Hermes-style mention in description/comment is opt-in.
+        needles = {
+            self.runtime.hermes_user_id.lower(),
+            self.runtime.username.lower(),
+        }
+        description = str(card.get("description") or "").lower()
+        if any(needle and needle in description for needle in needles):
+            return True
+
+        for comment in comments:
+            message = str(comment.get("message") or "").lower()
+            if any(needle and needle in message for needle in needles):
+                return True
+        return False
+
+    @staticmethod
+    def _last_comment_author(comment: Dict[str, Any]) -> Optional[str]:
+        for key in ("actorId", "actor", "author", "userId"):
+            value = comment.get(key)
+            if isinstance(value, dict):
+                value = value.get("uid") or value.get("id") or value.get("primaryKey")
+            if value:
+                return str(value).strip()
+        return None
+
+    async def _process_card(
+        self,
+        board: Dict[str, Any],
+        stack: Dict[str, Any],
+        card: Dict[str, Any],
+    ) -> None:
+        board_id = str(board.get("id") or "").strip()
+        stack_id = str(stack.get("id") or "").strip()
+        card_id = str(card.get("id") or "").strip()
+        if not board_id or not stack_id or not card_id:
             return
 
         comments = await self.client.get_card_comments(card_id)
-        last_comment = comments[-1] if comments else {}
-        last_comment_id = str(last_comment.get("id", "")) if last_comment else None
-        last_author = str(last_comment.get("author") or last_comment.get("actorId") or "") or None
-
-        assignees = card.get("assignedUsers") or card.get("assignees") or []
-        assigned_uids = []
-        if isinstance(assignees, list):
-            for a in assignees:
-                uid = a.get("uid") if isinstance(a, dict) else str(a)
-                if uid:
-                    assigned_uids.append(str(uid))
-
-        snapshot = DeckCardSnapshot(
-            board_id=str(board_id),
-            stack_id=str(stack_id),
-            card_id=card_id,
-            title=str(card.get("title", "")),
-            description=str(card.get("description", "")),
-            assigned_users=assigned_uids,
-            last_comment_id=last_comment_id,
-            last_author=last_author,
-        )
-
-        if not self.state_mgr.should_process(snapshot):
+        if not self._card_is_triggered(card, comments):
             return
 
-        actor_id, groups = self.identity_resolver.resolve_card_actor(
-            card, comment_author=last_author
+        last = comments[-1] if comments else {}
+        last_author = self._last_comment_author(last) if last else None
+        snapshot = DeckCardSnapshot(
+            board_id=board_id,
+            stack_id=stack_id,
+            card_id=card_id,
+            title=str(card.get("title") or ""),
+            description=str(card.get("description") or ""),
+            assigned_users=self.identity.assigned_uids(card),
+            last_comment_id=str(last.get("id")) if last.get("id") else None,
+            last_author=last_author,
+            due_date=str(card.get("duedate")) if card.get("duedate") else None,
+            done=card.get("done"),
         )
-        self.identity_resolver.set_contextvars_identity(actor_id, groups)
+
+        if not self.state.should_process(snapshot):
+            return
+
+        actor_id, groups = self.identity.resolve_card_actor(card, last_author)
+        self.identity.set_contextvars_identity(actor_id, groups)
 
         session_key = f"deck:board:{board_id}:card:{card_id}"
-
         source = self.build_source(
             chat_id=session_key,
-            chat_name=card.get("title", ""),
+            chat_name=snapshot.title or session_key,
             chat_type="deck_card",
             user_id=actor_id,
             user_name=actor_id,
+            message_id=card_id,
         )
         if isinstance(source, dict):
-            source["extra_headers"] = {
-                "X-On-Behalf-Of": actor_id,
-            }
+            source["extra_headers"] = {"X-On-Behalf-Of": actor_id}
 
-        msg_event = MessageEvent(
-            text=card.get("description", "") or card.get("title", ""),
+        text = f"Nextcloud Deck Karte: {snapshot.title}\nBeschreibung:\n{snapshot.description}"
+        if last and last.get("message"):
+            text += f"\n\nLetzter Kommentar von {last_author or 'unbekannt'}:\n{last['message']}"
+
+        event = MessageEvent(
+            text=text,
             message_type=MessageType.TEXT,
             source=source,
-            raw_message=card,
+            raw_message={
+                "board": board,
+                "stack": stack,
+                "card": card,
+                "comments": comments,
+            },
             message_id=card_id,
             user_id=actor_id,
             user_name=actor_id,
         )
-        await self.handle_message(msg_event)
+        result = self.handle_message(event)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def poll_once(self) -> int:
+        boards = await self.client.get_boards()
+        processed = 0
+        for board in boards:
+            board_id = str(board.get("id") or "").strip()
+            if not board_id:
+                continue
+            config = self._configured_board(board_id)
+            if config is None:
+                continue
+            stacks = await self.client.get_stacks(board_id)
+            for stack in stacks:
+                for card in stack.get("cards") or []:
+                    await self._process_card(board, stack, card)
+                    processed += 1
+        return processed
+
+    async def _polling_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Nextcloud Deck polling failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self.runtime.poll_interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
 
 
 def validate_deck_config(config: PlatformConfig) -> bool:
-    """Check-Funktion zur Validierung eines bestehenden Configuration-Objekts."""
-    extra = getattr(config, "extra", {}) or {}
-    base_url = (
-        extra.get("base_url")
-        or os.getenv("NEXTCLOUD_DECK_BASE_URL")
-        or os.getenv("NEXTCLOUD_BASE_URL", "")
+    runtime = _build_runtime_config(config)
+    return bool(
+        runtime.base_url
+        and runtime.username
+        and runtime.app_password
+        and runtime.hermes_user_id
     )
-    username = (
-        extra.get("username")
-        or os.getenv("NEXTCLOUD_DECK_USERNAME")
-        or os.getenv("NEXTCLOUD_USERNAME", "")
-    )
-    app_password = (
-        extra.get("app_password")
-        or getattr(config, "token", "")
-        or os.getenv("NEXTCLOUD_DECK_APP_PASSWORD")
-        or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
-    )
-    return bool(str(base_url).strip() and str(username).strip() and str(app_password).strip())
 
 
 def validate_deck_config_from_env() -> bool:
-    """Passive Probe für check_fn (gibt bool zurück)."""
-    base_url = os.getenv("NEXTCLOUD_DECK_BASE_URL") or os.getenv("NEXTCLOUD_BASE_URL", "")
-    username = os.getenv("NEXTCLOUD_DECK_USERNAME") or os.getenv("NEXTCLOUD_USERNAME", "")
-    app_password = os.getenv("NEXTCLOUD_DECK_APP_PASSWORD") or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
-    return bool(str(base_url).strip() and str(username).strip() and str(app_password).strip())
+    return bool(
+        _env("NEXTCLOUD_DECK_BASE_URL", "NEXTCLOUD_BASE_URL")
+        and _env("NEXTCLOUD_DECK_USERNAME", "NEXTCLOUD_USERNAME")
+        and _env("NEXTCLOUD_DECK_APP_PASSWORD", "NEXTCLOUD_APP_PASSWORD")
+    )
 
 
 def env_enablement() -> Optional[Dict[str, Any]]:
-    """Erforderliche env_enablement_fn für Hermes: Gibt None oder ein dict mit Seed-Extras zurück."""
-    base_url = os.getenv("NEXTCLOUD_DECK_BASE_URL") or os.getenv("NEXTCLOUD_BASE_URL", "")
-    username = os.getenv("NEXTCLOUD_DECK_USERNAME") or os.getenv("NEXTCLOUD_USERNAME", "")
-    app_password = os.getenv("NEXTCLOUD_DECK_APP_PASSWORD") or os.getenv("NEXTCLOUD_APP_PASSWORD", "")
-    if not (base_url and username and app_password):
+    if not validate_deck_config_from_env():
         return None
+    base_url = _env("NEXTCLOUD_DECK_BASE_URL", "NEXTCLOUD_BASE_URL")
+    username = _env("NEXTCLOUD_DECK_USERNAME", "NEXTCLOUD_USERNAME")
+    password = _env("NEXTCLOUD_DECK_APP_PASSWORD", "NEXTCLOUD_APP_PASSWORD")
+    try:
+        poll = float(
+            _env("NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS", "NEXTCLOUD_DECK_POLL_INTERVAL")
+            or 30
+        )
+    except ValueError:
+        poll = 30.0
     return {
         "base_url": base_url,
         "username": username,
-        "app_password": app_password,
-        "hermes_user_id": os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", username),
-        "poll_interval": float(os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL", 5.0)),
+        "app_password": password,
+        "hermes_user_id": _env("NEXTCLOUD_DECK_HERMES_USER_ID", "NEXTCLOUD_HERMES_USER_ID") or username,
+        "poll_interval_seconds": max(5.0, poll),
     }
 
 
@@ -307,7 +419,6 @@ def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
 
 
 def register(ctx: Any) -> None:
-    """Hermes Platform Plugin Registration Entrypoint."""
     ctx.register_platform(
         name="nextcloud_deck",
         label="Nextcloud Deck",
@@ -326,16 +437,8 @@ def register(ctx: Any) -> None:
     )
 
     skills_dir = Path(__file__).parent / "skills"
-    if skills_dir.exists() and hasattr(ctx, "register_skill"):
+    if hasattr(ctx, "register_skill") and skills_dir.is_dir():
         for child in sorted(skills_dir.iterdir()):
             skill_md = child / "SKILL.md"
-            if child.is_dir() and skill_md.exists():
-                try:
-                    plugin_id = getattr(ctx, "plugin_id", "nextcloud-deck-platform")
-                    ctx.register_skill(child.name, skill_md, plugin_id=plugin_id)
-                    logger.info("Skill '%s' für Plugin '%s' registriert.", child.name, plugin_id)
-                except TypeError:
-                    ctx.register_skill(child.name, skill_md)
-                    logger.info("Skill '%s' registriert.", child.name)
-                except Exception as exc:
-                    logger.warning("Fehler beim Registrieren von Skill '%s': %s", child.name, exc)
+            if child.is_dir() and skill_md.is_file():
+                ctx.register_skill(child.name, skill_md)

@@ -1,31 +1,31 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.2.4
+version: 0.3.0
 description: >
-  Nextcloud Deck platform adapter for Hermes Agent.
-  Monitors Deck boards, stacks, and cards; extracts work items, tasks, and comments;
-  propagates identity (assignee vs. commenter) and synchronizes status updates.
+  Nextcloud Deck platform adapter for Hermes Agent. Polls explicitly configured
+  boards, only ingests cards assigned to the configured Hermes user, and writes
+  Hermes responses back as Deck comments.
 author: Local Development
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
-    description: "Base URL of Nextcloud instance (e.g. https://cloud.example.org)"
+    description: "Base URL of the Nextcloud instance"
     prompt: "Nextcloud base URL"
     password: false
   - name: NEXTCLOUD_DECK_USERNAME
-    description: "Nextcloud Deck account username"
-    prompt: "Nextcloud Deck username"
+    description: "Nextcloud username used by the adapter"
+    prompt: "Nextcloud username"
     password: false
   - name: NEXTCLOUD_DECK_APP_PASSWORD
-    description: "App password for Nextcloud Deck"
-    prompt: "Nextcloud Deck app password"
+    description: "Nextcloud app password"
+    prompt: "Nextcloud app password"
     password: true
 optional_env:
   - name: NEXTCLOUD_DECK_HERMES_USER_ID
-    description: "User ID of the Hermes Bot in Nextcloud (defaults to username)"
-    prompt: "Hermes Bot User ID"
+    description: "Nextcloud user ID assigned to Hermes"
+    prompt: "Hermes Nextcloud user ID"
     password: false
-  - name: NEXTCLOUD_DECK_POLL_INTERVAL
-    description: "Polling interval for card updates in seconds (default: 5)"
+  - name: NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS
+    description: "Polling interval in seconds (minimum 5)"
     prompt: "Polling interval"
     password: false

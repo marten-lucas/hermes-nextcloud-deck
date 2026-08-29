@@ -1,3 +1,3 @@
-from .adapter import NextcloudDeckPlatform, register
+from .adapter import register
 
-__all__ = ["NextcloudDeckPlatform", "register"]
+__all__ = ["register"]
