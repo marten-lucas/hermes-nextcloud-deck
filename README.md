@@ -38,10 +38,14 @@ Do not omit `boards`. An empty board list means the adapter connects but intenti
 ```bash
 systemctl --user restart hermes-gateway.service
 hermes plugins doctor nextcloud-deck-platform
-hermes skills inspect nextcloud-deck-platform:nextcloud-deck
+hermes skills list
 ```
 
-Plugin skills are namespaced as `plugin:skill` by Hermes; a bare skill name is not expected to resolve.
+Important: `hermes skills inspect` is a Skills Hub/source resolver in the affected
+Hermes releases; it is not a reliable verifier for a `SKILL.md` shipped inside a
+platform plugin. A `No skill named ... found in any source` result therefore does
+not prove that the plugin itself failed to load. Verify plugin loading with
+`hermes plugins doctor` and inspect the plugin's local `skills/` directory directly.
 
 ## Tests
 

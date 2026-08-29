@@ -38,7 +38,11 @@ After changing the plugin:
 ```bash
 systemctl --user restart hermes-gateway.service
 hermes plugins doctor nextcloud-deck-platform
-hermes skills inspect nextcloud-deck-platform:nextcloud-deck
+hermes skills list
 ```
 
-The skill name is namespaced by the plugin. A bare `hermes skills inspect nextcloud-deck` lookup is not expected to resolve a plugin-provided skill.
+Do not use `hermes skills inspect` as the plugin-local verification step. In
+affected Hermes releases, `skills inspect` resolves Skills Hub/source entries
+and can report `No skill named ... found in any source` for a valid local skill.
+Use `hermes plugins doctor nextcloud-deck-platform` for plugin registration and
+check `skills/nextcloud-deck/SKILL.md` on disk for the plugin-local skill.

@@ -70,6 +70,10 @@ class TestNextcloudDeckPlatform(unittest.TestCase):
         )
         adapter = NextcloudDeckPlatform(config)
         self.assertEqual(adapter.runtime.boards, {})
+        self.assertEqual(
+            adapter._card_id_from_target("deck:board:1:card:100"),
+            "100",
+        )
 
 
 if __name__ == "__main__":

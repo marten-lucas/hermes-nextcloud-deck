@@ -219,6 +219,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     ) -> SendResult:
         return await self.send(target, text, reply_to_message_id, metadata)
 
+    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+        """Return stable chat metadata for a Deck card session."""
+        parts = str(chat_id).split(":")
+        board_id = parts[parts.index("board") + 1] if "board" in parts and parts.index("board") + 1 < len(parts) else None
+        card_id = self._card_id_from_target(chat_id)
+        return {
+            "id": str(chat_id),
+            "name": f"Nextcloud Deck card {card_id}",
+            "type": "deck_card",
+            "board_id": board_id,
+            "card_id": card_id,
+        }
+
     @staticmethod
     def _card_id_from_target(target: str) -> str:
         parts = str(target).split(":")

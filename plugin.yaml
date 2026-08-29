@@ -1,7 +1,7 @@
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform
-version: 0.3.0
+version: 0.3.1
 description: >
   Nextcloud Deck platform adapter for Hermes Agent. Polls explicitly configured
   boards, only ingests cards assigned to the configured Hermes user, and writes
