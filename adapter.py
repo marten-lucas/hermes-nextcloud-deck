@@ -25,7 +25,21 @@ try:
         SendResult,
     )
 except Exception:  # local test fallback
-    Platform = lambda name: name  # type: ignore
+    class Platform:  # type: ignore
+        """Local fallback for Platform enum."""
+        def __init__(self, name: str) -> None:
+            self.name = name
+        def __str__(self) -> str:
+            return self.name
+        def __eq__(self, other: object) -> bool:
+            if isinstance(other, Platform):
+                return self.name == other.name
+            if isinstance(other, str):
+                return self.name == other
+            return False
+        def __hash__(self) -> int:
+            return hash(self.name)
+
     PlatformConfig = Any  # type: ignore
 
     class MessageType:
@@ -48,9 +62,15 @@ except Exception:  # local test fallback
         user_name: Optional[str] = None
 
     class BasePlatformAdapter:
-        def __init__(self, config: Any, platform: str = "nextcloud_deck") -> None:
+        def __init__(self, config: Any, platform: Any) -> None:
             self.config = config
             self.platform = platform
+            self._message_handler: Any = None
+            self._running = False
+            self._active_sessions: Dict[str, asyncio.Event] = {}
+            self._session_tasks: Dict[str, asyncio.Task] = {}
+            self._background_tasks: set = set()
+            self._busy_text_mode: str = "interrupt"
 
         def build_source(self, **kwargs: Any) -> Dict[str, Any]:
             return kwargs
