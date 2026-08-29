@@ -641,6 +641,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         self._card_snapshots[work_item_id] = signature
 
+        groups = await self._get_user_groups(last_author)
         source = self.build_source(
             chat_id=work_item_id,
             chat_name=payload["card"]["title"] or work_item_id,
@@ -649,6 +650,21 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             user_name=last_author,
             message_id=payload["card"]["id"] or None,
         )
+        try:
+            extra_headers = {}
+            if isinstance(source, dict):
+                source.setdefault("extra_headers", {})
+                extra_headers = source["extra_headers"]
+            else:
+                extra_headers = getattr(source, "extra_headers", {}) or {}
+            extra_headers["X-On-Behalf-Of"] = last_author
+            extra_headers["X-User-Groups"] = ",".join(groups)
+            if isinstance(source, dict):
+                source["extra_headers"] = extra_headers
+            else:
+                setattr(source, "extra_headers", extra_headers)
+        except Exception:
+            logger.debug("Nextcloud Deck: SessionSource does not allow extra_headers")
 
         event_text = f"Nextcloud Deck Karte: {payload['card']['title']}\nBeschreibung:\n{payload['card']['description']}"
         if last_comment and last_comment.get("message"):

@@ -178,6 +178,58 @@ class Phase1AdapterTests(unittest.IsolatedAsyncioTestCase):
             captured[0].raw_message["card"]["checklist_items"],
         )
 
+    async def test_poll_once_sets_human_identity_headers_on_source(self):
+        config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes-user",
+                "boards": [{"board_id": "7"}],
+            },
+            token="",
+        )
+        adapter = MODULE.NextcloudDeckPlatform(config)
+        adapter._user_groups_cache["alice"] = ["admin", "kiga_board"]
+        adapter._session = FakeSession(
+            {
+                "boards": {"payload": [{"id": 7, "title": "Infra"}]},
+                "boards/7/stacks": {
+                    "payload": [
+                        {
+                            "id": 70,
+                            "title": "Backlog",
+                            "cards": [
+                                {
+                                    "id": 701,
+                                    "title": "Prepare rollout",
+                                    "description": "- [ ] write note",
+                                    "assignedUsers": [{"uid": "hermes-user", "displayname": "Hermes"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "cards/701/comments": {
+                    "payload": [
+                        {
+                            "id": 900,
+                            "message": "Please handle this first.",
+                            "actor": {"uid": "alice", "displayname": "Alice"},
+                        }
+                    ]
+                },
+            }
+        )
+
+        events = await adapter.poll_once()
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("alice", events[0].source["user_id"])
+        self.assertEqual("alice", events[0].user_id)
+        self.assertEqual("admin,kiga_board", events[0].source["extra_headers"]["X-User-Groups"])
+        self.assertEqual("alice", events[0].source["extra_headers"]["X-On-Behalf-Of"])
+
     async def test_poll_once_skips_unchanged_cards(self):
         config = SimpleNamespace(
             extra={
