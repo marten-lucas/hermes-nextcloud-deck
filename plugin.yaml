@@ -1,7 +1,7 @@
-name: nextcloud-deck-platform
+name: nextcloud_deck
 label: Nextcloud Deck
 kind: platform
-version: 0.1.15
+version: 0.1.16
 description: >
   Nextcloud Deck platform adapter for Hermes Agent.
   Connects as a regular Nextcloud user, polls Deck boards via the official API,

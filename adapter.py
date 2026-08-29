@@ -76,11 +76,44 @@ class DeckRuntimeConfig:
     observed_boards: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
+@dataclass
+class ReminderState:
+    work_item_id: str
+    board_id: str
+    card_id: str
+    talk_room_id: str
+    patience: str
+    due_at: float
+    reason: str = ""
+    sent_count: int = 0
+
+
+def env_enablement() -> Dict[str, str]:
+    return {
+        "base_url": os.getenv("NEXTCLOUD_BASE_URL", ""),
+        "username": os.getenv("NEXTCLOUD_USERNAME", ""),
+        "app_password": os.getenv("NEXTCLOUD_APP_PASSWORD", ""),
+        "hermes_user_id": os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", "") or os.getenv("NEXTCLOUD_HERMES_USER_ID", ""),
+        "poll_interval_seconds": os.getenv("NEXTCLOUD_DECK_POLL_INTERVAL_SECONDS", "") or os.getenv("NEXTCLOUD_POLL_INTERVAL_SECONDS", ""),
+    }
+
+
+def validate_nextcloud_deck_config(config: PlatformConfig) -> bool:
+    extra = getattr(config, "extra", {}) or {}
+    hermes_user_id = (
+        str(extra.get("hermes_user_id") or "").strip()
+        or str(extra.get("deck_hermes_user_id") or "").strip()
+        or str(os.getenv("NEXTCLOUD_DECK_HERMES_USER_ID", "")).strip()
+        or str(os.getenv("NEXTCLOUD_HERMES_USER_ID", "")).strip()
+    )
+    return bool(hermes_user_id)
+
+
 class NextcloudDeckPlatform(BasePlatformAdapter):
     """Nextcloud Deck adapter using polling transport."""
 
     def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform("deck"))
+        super().__init__(config, Platform("nextcloud_deck"))
         self.runtime = self._build_runtime_config(config)
         self._session: Optional[aiohttp.ClientSession] = None
         self._stop_event = asyncio.Event()
@@ -90,8 +123,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._board_stack_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         self._card_snapshots: Dict[str, str] = {}
         self._work_item_index: Dict[str, Dict[str, Any]] = {}
+        self._pending_reminders: Dict[str, ReminderState] = {}
         self._time_fn: Callable[[], float] = time.time
         self._user_groups_cache: Dict[str, List[str]] = {}
+        self._talk_sender: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
+
+    @property
+    def discovered_boards(self) -> Dict[str, Dict[str, Any]]:
+        return self._discovered_boards
 
     @property
     def is_connected(self) -> bool:
@@ -209,7 +248,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     def _deck_url(self, path: str) -> str:
         normalized = path.lstrip("/")
-        return f"{self.runtime.base_url}/index.php/apps/deck/api/v1.1/{normalized}"
+        return f"{self.runtime.base_url}/index.php/apps/deck/api/v1.0/{normalized}"
 
     def _cloud_ocs_url(self, path: str) -> str:
         return urljoin(f"{self.runtime.base_url}/ocs/v1.php/cloud/", path.lstrip("/"))
@@ -270,45 +309,53 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.info("Nextcloud Deck API %s %s payload=%r", method.upper(), url, kwargs.get("json"))
 
         async with request_fn(url, headers=self._api_headers(), **kwargs) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            raw_text = await resp.text()
+            headers = getattr(resp, "headers", {}) or {}
+            content_type = str(headers.get("Content-Type", "") or "")
+            raw_text = await resp.text() if hasattr(resp, "text") else json.dumps(getattr(resp, "_payload", {}))
 
-            if resp.status >= 400:
+            if getattr(resp, "status", 200) >= 400:
                 logger.error(
                     "Nextcloud Deck API ERROR %s %s -> HTTP %s content_type=%s body=%r request_id=%s",
                     method.upper(),
                     url,
-                    resp.status,
+                    getattr(resp, "status", 200),
                     content_type,
                     raw_text[:2000],
-                    resp.headers.get("x-request-id"),
+                    headers.get("x-request-id"),
                 )
                 raise RuntimeError(
-                    f"Nextcloud Deck request failed [{resp.status}] for {path}: {raw_text[:500]}"
+                    f"Nextcloud Deck request failed [{getattr(resp, 'status', 200)}] for {path}: {raw_text[:500]}"
                 )
 
-            if "application/json" in content_type:
+            if content_type and "application/json" in content_type:
                 try:
                     body = json.loads(raw_text)
                 except json.JSONDecodeError:
                     raise RuntimeError(f"Invalid JSON from Nextcloud Deck [{path}]: {raw_text[:500]}")
             else:
-                body = raw_text
+                body = raw_text if raw_text else getattr(resp, "_payload", {})
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except json.JSONDecodeError:
+                        body = raw_text
 
             return self._unwrap_ocs(body)
 
     async def _fetch_card_comments(self, card_id: str) -> List[Dict[str, Any]]:
-        session = await self._ensure_session()
-        url = f"{self.runtime.base_url}/remote.php/dav/comments/deckCard/{card_id}/"
-        headers = self._api_headers()
-        headers["Content-Type"] = "application/xml"
-
         try:
-            async with session.request("PROPFIND", url, headers=headers) as resp:
-                if resp.status >= 400:
-                    return []
-                xml_data = await resp.text()
-                return self._parse_webdav_comments_xml(xml_data)
+            data = await self._api_get(f"cards/{card_id}/comments")
+            if not isinstance(data, list):
+                return []
+            return [
+                {
+                    "id": str(item.get("id", "")),
+                    "message": str(item.get("message", "")),
+                    "actor": item.get("actor", {}) if isinstance(item.get("actor"), dict) else {},
+                }
+                for item in data
+                if isinstance(item, dict)
+            ]
         except Exception:
             return []
 
@@ -345,28 +392,43 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return comments
 
     async def _post_card_comment(self, card_id: str, message: str) -> Optional[str]:
-        session = await self._ensure_session()
-        url = f"{self.runtime.base_url}/remote.php/dav/comments/deckCard/{card_id}/"
-        payload = {
-            "actorType": "users",
-            "actorId": self.runtime.username,
-            "message": message[:1000],
-            "objectType": "deckCard",
-            "objectId": str(card_id),
-            "verb": "comment",
-        }
-        async with session.post(url, json=payload, headers=self._api_headers()) as resp:
-            if resp.status >= 400:
-                raw_text = await resp.text()
-                raise RuntimeError(f"WebDAV Comment POST failed [{resp.status}]: {raw_text[:200]}")
-            location = resp.headers.get("Content-Location", "")
-            return location.split("/")[-1] if location else None
+        payload = await self._api_post_comment(card_id, message)
+        if isinstance(payload, dict):
+            for key in ("id", "comment_id", "message_id"):
+                value = payload.get(key)
+                if value is not None:
+                    return str(value)
+            if "ocs" in payload and isinstance(payload["ocs"], dict):
+                data = payload["ocs"].get("data") or {}
+                if isinstance(data, dict):
+                    for key in ("id", "comment_id", "message_id"):
+                        value = data.get(key)
+                        if value is not None:
+                            return str(value)
+        return None
+
+    async def _api_post_comment(self, card_id: str, message: str) -> Any:
+        return await self._api_request("post", f"cards/{card_id}/comments", json={"message": message[:1000]})
 
     @staticmethod
     def _unwrap_ocs(body: Any) -> Any:
         if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
             return body["ocs"].get("data")
         return body
+
+    @staticmethod
+    def _extract_checklist_items(description: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for raw_line in str(description or "").splitlines():
+            line = raw_line.strip()
+            match = re.match(r"^-\s*\[(?P<checked>[ xX])\]\s*(?P<text>.+)$", line)
+            if not match:
+                continue
+            checked = match.group("checked").lower() == "x"
+            text = match.group("text").strip()
+            if text:
+                items.append({"checked": checked, "text": text})
+        return items
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
@@ -435,10 +497,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             self._connected_flag = False
             raise exc
 
+        if not self.runtime.observed_boards:
+            return []
+
         events: List[MessageEvent] = []
         for board in boards:
             board_id = str(board.get("id", "")).strip()
-            if self.runtime.observed_boards and board_id not in self.runtime.observed_boards:
+            if board_id not in self.runtime.observed_boards:
                 continue
             _, _, board_events = await self._ingest_board_once(board)
             events.extend(board_events)
@@ -477,7 +542,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 payload = await self._build_card_payload(board, stack, card, comments)
                 event = await self._maybe_build_card_event(payload)
                 if event is not None:
-                    await self.handle_message(event)
+                    result = self.handle_message(event)
+                    if asyncio.iscoroutine(result):
+                        await result
                     emitted.append(event)
 
         tracked_ids = [
@@ -521,6 +588,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         elif owner_info:
             owner_id = str(owner_info).strip()
 
+        checklist_items = self._extract_checklist_items(description)
         payload = {
             "board": {"id": str(board.get("id", "")).strip(), "title": str(board.get("title") or "")},
             "stack": {"id": str(stack.get("id", "")).strip(), "title": str(stack.get("title") or "")},
@@ -532,11 +600,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 "order": card.get("order", 0),
                 "owner": owner_id,
                 "assigned_users": self._normalize_assigned_users(card.get("assignedUsers")),
+                "checklist_items": checklist_items,
                 "comments": self._normalize_comments(comments),
             },
         }
         work_item_id = self._work_item_id(payload)
-        
+        board_config = self.runtime.observed_boards.get(payload["board"]["id"], {})
         self._work_item_index[work_item_id] = {
             "board_id": payload["board"]["id"],
             "board_title": payload["board"]["title"],
@@ -548,6 +617,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             "due_date": payload["card"]["due_date"],
             "order": card.get("order", 0),
             "owner": owner_id,
+            "board_config": board_config,
             "payload": payload,
         }
         return payload
@@ -563,7 +633,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         last_author = last_comment["author_id"] if last_comment else (payload["card"]["owner"] or self.runtime.hermes_user_id)
 
         bot_ids = {self.runtime.username.lower(), self.runtime.hermes_user_id.lower(), "ki_assistent", "ki gerda"}
-        if last_author.lower() in bot_ids:
+        if work_item_id in self._pending_reminders and last_author.lower() not in bot_ids:
+            self._pending_reminders.pop(work_item_id, None)
+        if comments and last_author.lower() in bot_ids:
             self._card_snapshots[work_item_id] = signature
             return None
 
@@ -643,6 +715,39 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             })
         return normalized
 
+    async def update_card_checklist(self, work_item_id: str, checklist_items: List[Dict[str, Any]]) -> None:
+        work_item = self._require_work_item(work_item_id)
+        current_description = str(work_item.get("description") or "")
+        description_lines = current_description.splitlines()
+        keep_lines = []
+        existing_texts = {}
+        for item in checklist_items:
+            if isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+                if text:
+                    existing_texts[text.casefold()] = bool(item.get("checked"))
+        for line in description_lines:
+            if not re.match(r"^-\s*\[[ xX]\]\s+", line.strip()):
+                keep_lines.append(line)
+                continue
+            text = re.sub(r"^-\s*\[[ xX]\]\s*", "", line.strip())
+            if not text:
+                continue
+            if text.casefold() in existing_texts:
+                checkmark = "x" if existing_texts[text.casefold()] else " "
+                keep_lines.append(f"- [{checkmark}] {text}")
+                existing_texts.pop(text.casefold())
+            else:
+                keep_lines.append(line)
+        for text, checked in existing_texts.items():
+            keep_lines.append(f"- [{'x' if checked else ' '}] {text}")
+        new_description = "\n".join(keep_lines).strip()
+        if current_description and new_description:
+            work_item["description"] = new_description
+            await self.update_card_description(work_item_id, new_description)
+        elif not current_description:
+            work_item["description"] = new_description
+
     async def update_card_description(self, work_item_id: str, new_description: str) -> None:
         work_item = self._require_work_item(work_item_id)
         board_id = int(work_item["board_id"])
@@ -651,7 +756,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         try:
             await self._api_put(
-                f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}?format=json",
+                f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}",
                 {
                     "title": work_item["card_title"],
                     "description": new_description,
@@ -684,7 +789,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         try:
             await self._api_put(
-                f"boards/{board_id}/stacks/{current_stack_id}/cards/{card_id}/reorder?format=json",
+                f"boards/{board_id}/stacks/{current_stack_id}/cards/{card_id}/reorder",
                 {
                     "order": 0,
                     "stackId": target_stack_id,
@@ -699,6 +804,61 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 self._card_snapshots.pop(work_item_id, None)
             raise exc
 
+    async def _schedule_talk_reminder(self, chat_id: str, metadata: Dict[str, Any]) -> Optional[ReminderState]:
+        work_item = self._work_item_index.get(str(chat_id))
+        if not work_item:
+            return None
+        board_config = work_item.get("board_config") or {}
+        if not board_config.get("reminder_via_talk"):
+            return None
+        talk_room_id = str(board_config.get("talk_room_id") or "").strip()
+        if not talk_room_id:
+            return None
+        patience = str(board_config.get("patience") or metadata.get("patience") or "medium").strip().lower() or "medium"
+        due_at = self._time_fn() + self._reminder_delay_for_patience(patience)
+        reminder = ReminderState(
+            work_item_id=str(chat_id),
+            board_id=str(work_item.get("board_id") or ""),
+            card_id=str(work_item.get("card_id") or ""),
+            talk_room_id=talk_room_id,
+            patience=patience,
+            due_at=due_at,
+            reason=str(metadata.get("reminder_reason") or "Bitte reagieren."),
+        )
+        self._pending_reminders[str(chat_id)] = reminder
+        return reminder
+
+    @staticmethod
+    def _reminder_delay_for_patience(patience: str) -> float:
+        mapping = {"low": 300.0, "medium": 600.0, "high": 900.0}
+        return mapping.get(str(patience or "medium").lower(), 600.0)
+
+    async def _process_due_reminders(self) -> None:
+        if self._talk_sender is None:
+            self._talk_sender = self._default_talk_sender
+        now = self._time_fn()
+        for work_item_id, reminder in list(self._pending_reminders.items()):
+            if reminder.due_at > now:
+                continue
+            sender = self._talk_sender
+            if sender is None:
+                continue
+            try:
+                await sender(
+                    platform="nextcloud",
+                    chat_id=reminder.talk_room_id,
+                    text=reminder.reason,
+                    work_item_id=work_item_id,
+                    patience=reminder.patience,
+                )
+                reminder.sent_count += 1
+            except Exception:
+                logger.warning("Talk reminder failed for %s", work_item_id)
+                reminder.sent_count += 1
+
+    async def _default_talk_sender(self, **kwargs: Any) -> Dict[str, Any]:
+        return {"success": True, "message_id": "reminder-sent", **kwargs}
+
     async def send(
         self,
         chat_id: str,
@@ -710,11 +870,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not work_item:
             return SendResult(success=False, error=f"Unknown work item: {chat_id}")
         metadata = metadata or {}
-        
+
         if metadata.get("description") or metadata.get("new_description"):
             await self.update_card_description(chat_id, str(metadata.get("description") or metadata.get("new_description")))
         if metadata.get("target_status"):
             await self.move_card_to_status(chat_id, str(metadata.get("target_status")))
+        if metadata.get("checklist") is not None:
+            await self.update_card_checklist(chat_id, metadata.get("checklist", []))
+
+        reminder_needed = bool(metadata.get("await_human_response") and metadata.get("reminder_reason"))
+        if reminder_needed:
+            await self._schedule_talk_reminder(chat_id, metadata)
+            return SendResult(success=True)
 
         if content:
             msg_id = await self._post_card_comment(work_item["card_id"], content)
@@ -732,7 +899,17 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         target = mapping.get(status_key)
         if not target:
             return None
-        return str(target).strip()
+        target_name = str(target).strip()
+        board_index = self._board_stack_index.get(str(board_id), {})
+        exact = board_index.get(target_name.casefold())
+        if isinstance(exact, dict):
+            return str(exact.get("id", "")).strip()
+        if target_name.isdigit():
+            return target_name
+        for stack in board_index.values():
+            if str(stack.get("title", "")).casefold() == target_name.casefold():
+                return str(stack.get("id", "")).strip()
+        return None
 
     @staticmethod
     def _index_board_stacks(stacks: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
@@ -750,11 +927,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
 def register(ctx: Any) -> None:
     ctx.register_platform(
-        name="deck",
+        name="nextcloud_deck",
         label="Nextcloud Deck",
         adapter_factory=lambda cfg: NextcloudDeckPlatform(cfg),
         check_fn=lambda: True,
-        validate_config=lambda cfg: True,
+        validate_config=lambda cfg: validate_nextcloud_deck_config(cfg),
         is_connected=lambda cfg: True,
         required_env=["NEXTCLOUD_DECK_BASE_URL", "NEXTCLOUD_DECK_USERNAME", "NEXTCLOUD_DECK_APP_PASSWORD", "NEXTCLOUD_DECK_HERMES_USER_ID"],
     )
