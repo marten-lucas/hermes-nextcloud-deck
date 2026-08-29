@@ -1,3 +1,8 @@
+---
+name: nextcloud-collaboration
+description: Identity, permission, and guardrail rules for Nextcloud Talk and Deck interactions.
+---
+
 # Nextcloud Collaboration & Identity Guardrails
 
 When working through Nextcloud Talk or Deck:
