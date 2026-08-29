@@ -186,7 +186,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not card_id:
             return
 
-        # Kommentare via REST API abrufen
         comments = await self.client.get_card_comments(card_id)
         last_comment = comments[-1] if comments else {}
         last_comment_id = str(last_comment.get("id", "")) if last_comment else None
@@ -211,7 +210,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             last_author=last_author,
         )
 
-        # Polling-Dedup: Überspringen, falls keine Änderung vorliegt
         if not self.state_mgr.should_process(snapshot):
             return
 
@@ -303,14 +301,17 @@ def register(ctx: Any) -> None:
         emoji="🎴",
     )
 
-    # Skills registrieren (pathlib.Path übergibt Objekt, vermeidet AttributeError)
     skills_dir = Path(__file__).parent / "skills"
     if skills_dir.exists() and hasattr(ctx, "register_skill"):
         for child in sorted(skills_dir.iterdir()):
             skill_md = child / "SKILL.md"
             if child.is_dir() and skill_md.exists():
                 try:
+                    plugin_id = getattr(ctx, "plugin_id", "nextcloud-deck-platform")
+                    ctx.register_skill(child.name, skill_md, plugin_id=plugin_id)
+                    logger.info("Skill '%s' für Plugin '%s' registriert.", child.name, plugin_id)
+                except TypeError:
                     ctx.register_skill(child.name, skill_md)
-                    logger.info("Skill '%s' registriert aus %s", child.name, skill_md)
+                    logger.info("Skill '%s' registriert.", child.name)
                 except Exception as exc:
                     logger.warning("Fehler beim Registrieren von Skill '%s': %s", child.name, exc)
