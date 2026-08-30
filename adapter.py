@@ -189,6 +189,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         await self.client.close()
         self._mark_disconnected()
 
+    async def get_chat_info(self, target: str) -> Dict[str, Any]:
+        """Returns metadata for the target Deck card session."""
+        card_id = self._card_id_from_target(target)
+        return {
+            "id": card_id,
+            "target": target,
+            "type": "deck_card",
+        }
+
     async def send(
         self,
         target: str,
