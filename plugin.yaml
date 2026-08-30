@@ -7,6 +7,11 @@ description: >
   boards, only ingests cards assigned to the configured Hermes user, and writes
   Hermes responses back as Deck comments.
 author: Local Development
+skills:
+  - name: nextcloud-deck
+    path: skills/nextcloud-deck
+  - name: nextcloud-collaboration
+    path: skills/nextcloud-collaboration
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance"
