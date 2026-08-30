@@ -16,7 +16,7 @@ class NextcloudDeckError(RuntimeError):
 
 
 class NextcloudDeckClient:
-    """Small, strict client for the Nextcloud Deck REST API."""
+    """Small, strict client for the Nextcloud Deck REST and OCS API."""
 
     def __init__(self, base_url: str, username: str, app_password: str, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
@@ -58,6 +58,12 @@ class NextcloudDeckClient:
             path.lstrip("/"),
         )
 
+    def ocs_url(self, path: str) -> str:
+        return urljoin(
+            f"{self.base_url}/ocs/v2.php/apps/deck/api/v1.0/",
+            path.lstrip("/"),
+        )
+
     @staticmethod
     def _unwrap(body: Any) -> Any:
         if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
@@ -70,9 +76,15 @@ class NextcloudDeckClient:
             return body["ocs"].get("data")
         return body
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        use_ocs: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         session = await self.ensure_session()
-        url = self.deck_url(path)
+        url = self.ocs_url(path) if use_ocs else self.deck_url(path)
         try:
             async with session.request(method, url, headers=self.headers(), **kwargs) as resp:
                 raw = await resp.text()
@@ -100,13 +112,14 @@ class NextcloudDeckClient:
         return data if isinstance(data, list) else []
 
     async def get_card_comments(self, card_id: str | int) -> List[Dict[str, Any]]:
-        data = await self._request("GET", f"cards/{card_id}/comments")
+        data = await self._request("GET", f"cards/{card_id}/comments", use_ocs=True)
         return data if isinstance(data, list) else []
 
     async def add_comment(self, card_id: str | int, message: str) -> Optional[Dict[str, Any]]:
         data = await self._request(
             "POST",
             f"cards/{card_id}/comments",
+            use_ocs=True,
             json={"message": str(message)[:1000]},
         )
         return data if isinstance(data, dict) else None
