@@ -442,18 +442,3 @@ def register(ctx: Any) -> None:
         max_message_length=16000,
         emoji="🎴",
     )
-
-    skills_dir = Path(__file__).parent.resolve() / "skills"
-    if hasattr(ctx, "register_skill") and skills_dir.is_dir():
-        for child in sorted(skills_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            skill_md = child / "SKILL.md"
-            if not skill_md.is_file():
-                skill_md = child / "skill.md"
-            if skill_md.is_file():
-                ctx.register_skill(
-                    child.name,  # Kein Doppelpunkt! Hermes erzeugt den Namespace selbst.
-                    skill_md.resolve(),
-                    "Work with the Nextcloud Deck platform adapter and its configured card workflow.",
-                )
