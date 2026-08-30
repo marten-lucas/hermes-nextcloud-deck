@@ -453,7 +453,7 @@ def register(ctx: Any) -> None:
                 skill_md = child / "skill.md"
             if skill_md.is_file():
                 ctx.register_skill(
-                    f"nextcloud-deck-platform:{child.name}",
+                    child.name,  # Kein Doppelpunkt! Hermes erzeugt den Namespace selbst.
                     skill_md.resolve(),
                     "Work with the Nextcloud Deck platform adapter and its configured card workflow.",
                 )
