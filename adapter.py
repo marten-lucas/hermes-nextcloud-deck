@@ -48,7 +48,7 @@ except Exception:  # local test fallback
         user_name: Optional[str] = None
 
     class BasePlatformAdapter:
-        def __init__(self, config: Any, platform: str = "nextcloud_deck") -> None:
+        def __init__(self, config: Any, platform: str = "deck") -> None:
             self.config = config
             self.platform = platform
 
@@ -146,7 +146,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     """Polling platform adapter for explicitly configured Nextcloud Deck boards."""
 
     def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform("nextcloud_deck"))
+        super().__init__(config, Platform("deck"))
         self.runtime = _build_runtime_config(config)
         self.client = NextcloudDeckClient(
             self.runtime.base_url,
@@ -427,7 +427,7 @@ def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
 
 def register(ctx: Any) -> None:
     ctx.register_platform(
-        name="nextcloud_deck",
+        name="deck",
         label="Nextcloud Deck",
         adapter_factory=_build_adapter,
         check_fn=validate_deck_config_from_env,

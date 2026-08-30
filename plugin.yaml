@@ -9,7 +9,6 @@ description: >
 author: Local Development
 entrypoint: adapter.py
 skills:
-  - skills/nextcloud-collaboration
   - skills/nextcloud-deck
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
