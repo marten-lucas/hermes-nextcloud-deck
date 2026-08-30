@@ -8,8 +8,6 @@ description: >
   Hermes responses back as Deck comments.
 author: Local Development
 entrypoint: adapter.py
-skills:
-  - skills/nextcloud-deck
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance"
