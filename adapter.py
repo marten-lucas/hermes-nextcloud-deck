@@ -288,6 +288,34 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         last = comments[-1] if comments else {}
         last_author = self._last_comment_author(last) if last else None
+
+        # --- LOOPS & SYSTEM-MESSAGE FILTER ---
+        # 1. Ignoriere eigene Nachrichten, leere Absender sowie reservierte System-Accounts
+        if last_author and (
+            last_author == self.runtime.username
+            or last_author == self.runtime.hermes_user_id
+            or last_author.lower() in {"system", "changelog", "sample"}
+        ):
+            logger.debug("Nextcloud Deck: Ignoriere eigenen oder System-Kommentar (Author: %s)", last_author)
+            return
+
+        # 2. Native Nextcloud System-Message / System-Event Flags auswerten
+        if last and (last.get("systemMessage") or last.get("system_message")):
+            logger.debug("Nextcloud Deck: Ignoriere native SystemMessage auf Karte %s", card_id)
+            return
+
+        # 3. Ignoriere systemgenerierte Textnachrichten & Platzhalter
+        last_message = str(last.get("message") or "") if last else ""
+        if (
+            "{actor}" in last_message
+            or "Das System hat" in last_message
+            or "Gesprächseinstellungen verwalten" in last_message
+            or "Unterhaltungsinformationen bearbeiten" in last_message
+        ):
+            logger.debug("Nextcloud Deck: Ignoriere automatische System-Textnachricht auf Karte %s", card_id)
+            return
+        # -------------------------------------
+
         snapshot = DeckCardSnapshot(
             board_id=board_id,
             stack_id=stack_id,
