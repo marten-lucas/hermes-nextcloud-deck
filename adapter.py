@@ -25,21 +25,7 @@ try:
         SendResult,
     )
 except Exception:  # local test fallback
-    class Platform:  # type: ignore
-        """Local fallback for Platform enum."""
-        def __init__(self, name: str) -> None:
-            self.name = name
-        def __str__(self) -> str:
-            return self.name
-        def __eq__(self, other: object) -> bool:
-            if isinstance(other, Platform):
-                return self.name == other.name
-            if isinstance(other, str):
-                return self.name == other
-            return False
-        def __hash__(self) -> int:
-            return hash(self.name)
-
+    Platform = lambda name: name  # type: ignore
     PlatformConfig = Any  # type: ignore
 
     class MessageType:
@@ -62,15 +48,9 @@ except Exception:  # local test fallback
         user_name: Optional[str] = None
 
     class BasePlatformAdapter:
-        def __init__(self, config: Any, platform: Any) -> None:
+        def __init__(self, config: Any, platform: str = "nextcloud_deck") -> None:
             self.config = config
             self.platform = platform
-            self._message_handler: Any = None
-            self._running = False
-            self._active_sessions: Dict[str, asyncio.Event] = {}
-            self._session_tasks: Dict[str, asyncio.Task] = {}
-            self._background_tasks: set = set()
-            self._busy_text_mode: str = "interrupt"
 
         def build_source(self, **kwargs: Any) -> Dict[str, Any]:
             return kwargs
@@ -192,7 +172,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         del is_reconnect
         self._stop_event.clear()
         await self.client.ensure_session()
-        # Fail fast on credentials/network errors instead of reporting a false connection.
         await self.client.get_boards()
         self._connected = True
         if self._polling_task is None or self._polling_task.done():
@@ -239,19 +218,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     ) -> SendResult:
         return await self.send(target, text, reply_to_message_id, metadata)
 
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Return stable chat metadata for a Deck card session."""
-        parts = str(chat_id).split(":")
-        board_id = parts[parts.index("board") + 1] if "board" in parts and parts.index("board") + 1 < len(parts) else None
-        card_id = self._card_id_from_target(chat_id)
-        return {
-            "id": str(chat_id),
-            "name": f"Nextcloud Deck card {card_id}",
-            "type": "deck_card",
-            "board_id": board_id,
-            "card_id": card_id,
-        }
-
     @staticmethod
     def _card_id_from_target(target: str) -> str:
         parts = str(target).split(":")
@@ -271,7 +237,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if self.runtime.hermes_user_id in assigned:
             return True
 
-        # Explicit @Hermes-style mention in description/comment is opt-in.
         needles = {
             self.runtime.hermes_user_id.lower(),
             self.runtime.username.lower(),
@@ -472,6 +437,10 @@ def register(ctx: Any) -> None:
     skills_dir = Path(__file__).parent / "skills"
     if hasattr(ctx, "register_skill") and skills_dir.is_dir():
         for child in sorted(skills_dir.iterdir()):
+            if not child.is_dir():
+                continue
             skill_md = child / "SKILL.md"
-            if child.is_dir() and skill_md.is_file():
+            if not skill_md.is_file():
+                skill_md = child / "skill.md"
+            if skill_md.is_file():
                 ctx.register_skill(child.name, skill_md)

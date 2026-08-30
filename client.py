@@ -16,7 +16,7 @@ class NextcloudDeckError(RuntimeError):
 
 
 class NextcloudDeckClient:
-    """Small, strict client for the Nextcloud Deck REST/OCS API."""
+    """Small, strict client for the Nextcloud Deck REST API."""
 
     def __init__(self, base_url: str, username: str, app_password: str, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
@@ -54,7 +54,7 @@ class NextcloudDeckClient:
 
     def deck_url(self, path: str) -> str:
         return urljoin(
-            f"{self.base_url}/ocs/v2.php/apps/deck/api/v1.0/",
+            f"{self.base_url}/index.php/apps/deck/api/v1.0/",
             path.lstrip("/"),
         )
 
@@ -104,7 +104,6 @@ class NextcloudDeckClient:
         return data if isinstance(data, list) else []
 
     async def add_comment(self, card_id: str | int, message: str) -> Optional[Dict[str, Any]]:
-        # Deck's documented comment endpoint accepts JSON.
         data = await self._request(
             "POST",
             f"cards/{card_id}/comments",
