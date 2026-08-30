@@ -9,7 +9,7 @@ description: >
 author: Local Development
 entrypoint: adapter.py
 skills:
-  - skills/nextcloud-deck
+  - skills
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance"
