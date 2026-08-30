@@ -443,7 +443,7 @@ def register(ctx: Any) -> None:
         emoji="🎴",
     )
 
-    skills_dir = Path(__file__).parent / "skills"
+    skills_dir = Path(__file__).parent.resolve() / "skills"
     if hasattr(ctx, "register_skill") and skills_dir.is_dir():
         for child in sorted(skills_dir.iterdir()):
             if not child.is_dir():
@@ -452,4 +452,8 @@ def register(ctx: Any) -> None:
             if not skill_md.is_file():
                 skill_md = child / "skill.md"
             if skill_md.is_file():
-                ctx.register_skill(child.name, skill_md)
+                ctx.register_skill(
+                    f"nextcloud-deck-platform:{child.name}",
+                    skill_md.resolve(),
+                    "Work with the Nextcloud Deck platform adapter and its configured card workflow.",
+                )
