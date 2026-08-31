@@ -23,18 +23,27 @@ from identity import DeckIdentityResolver
 from state import DeckCardSnapshot, DeckStateManager
 
 
-class TestNextcloudDeckPlatform(unittest.TestCase):
-    def test_identity_resolver_bot_assigned(self):
-        resolver = DeckIdentityResolver(bot_user_id="hermes")
-        card = {"assignedUsers": [{"uid": "hermes"}]}
-        actor, groups = resolver.resolve_card_actor(card, comment_author="alice")
-        self.assertEqual(actor, "hermes")
-        self.assertEqual(groups, [])
+class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
+    async def test_identity_resolver_bot_author_uses_fallback(self):
+        original = os.environ.get("MCP_IDENTITY_FALLBACK_USER")
+        try:
+            os.environ["MCP_IDENTITY_FALLBACK_USER"] = "cronjob-user"
+            resolver = DeckIdentityResolver(bot_user_id="hermes")
+            card = {"assignedUsers": [{"uid": "hermes"}]}
+            actor, groups = await resolver.resolve_card_actor(card, comment_author="hermes")
+            # Bot als letzter Autor → Fallback-User statt Bot selbst (X-On-Behalf-Semantik)
+            self.assertEqual(actor, "cronjob-user")
+            self.assertEqual(groups, [])
+        finally:
+            if original is None:
+                os.environ.pop("MCP_IDENTITY_FALLBACK_USER", None)
+            else:
+                os.environ["MCP_IDENTITY_FALLBACK_USER"] = original
 
-    def test_identity_resolver_comment_author_fallback(self):
+    async def test_identity_resolver_comment_author(self):
         resolver = DeckIdentityResolver(bot_user_id="hermes")
         card = {"assignedUsers": [{"uid": "bob"}]}
-        actor, _ = resolver.resolve_card_actor(card, comment_author="alice")
+        actor, _ = await resolver.resolve_card_actor(card, comment_author="alice")
         self.assertEqual(actor, "alice")
 
     def test_state_manager_deduplication_and_change_detection(self):

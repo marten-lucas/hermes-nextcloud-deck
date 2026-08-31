@@ -10,10 +10,12 @@ from typing import Any, Dict, List, Optional
 try:
     from .client import NextcloudDeckClient, NextcloudDeckError
     from .identity import DeckIdentityResolver
+    from .outbound import categorize_gateway_message
     from .state import DeckCardSnapshot, DeckStateManager
 except ImportError:  # direct test/import
     from client import NextcloudDeckClient, NextcloudDeckError
     from identity import DeckIdentityResolver
+    from outbound import categorize_gateway_message
     from state import DeckCardSnapshot, DeckStateManager
 
 try:
@@ -73,6 +75,8 @@ class DeckRuntimeConfig:
     hermes_user_id: str
     poll_interval_seconds: float
     boards: Dict[str, Dict[str, Any]]
+    home_channel: Optional[str] = None
+    bot_aliases: tuple[str, ...] = ()
 
 
 def _env(name: str, *fallbacks: str) -> str:
@@ -132,6 +136,21 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
             if board_id:
                 boards[board_id] = dict(item)
 
+    home_channel = str(
+        extra.get("home_channel")
+        or _env("NEXTCLOUD_DECK_HOME_CHANNEL", "NEXTCLOUD_HOME_CHANNEL")
+    ).strip() or None
+
+    raw_aliases = (
+        extra.get("bot_aliases")
+        or _env("NEXTCLOUD_DECK_BOT_ALIASES", "NEXTCLOUD_BOT_ALIASES")
+    )
+    bot_aliases: tuple[str, ...] = ()
+    if isinstance(raw_aliases, str):
+        bot_aliases = tuple(a.strip().lower() for a in raw_aliases.split(",") if a.strip())
+    elif isinstance(raw_aliases, list):
+        bot_aliases = tuple(str(a).strip().lower() for a in raw_aliases if str(a).strip())
+
     return DeckRuntimeConfig(
         base_url=base_url,
         username=username,
@@ -139,6 +158,8 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         hermes_user_id=hermes_user_id,
         poll_interval_seconds=max(5.0, poll),
         boards=boards,
+        home_channel=home_channel,
+        bot_aliases=bot_aliases,
     )
 
 
@@ -153,7 +174,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             self.runtime.username,
             self.runtime.app_password,
         )
-        self.identity = DeckIdentityResolver(self.runtime.hermes_user_id)
+        self.identity = DeckIdentityResolver(self.runtime.hermes_user_id, client=self.client)
         self.state = DeckStateManager()
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
@@ -167,6 +188,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             and self._polling_task is not None
             and not self._polling_task.done()
         )
+
+    @property
+    def home_channel(self) -> Optional[str]:
+        """Default-Ziel für Cron/scheduled Zustellung."""
+        return self.runtime.home_channel
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
@@ -205,18 +231,128 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        del reply_to, metadata
+        del reply_to
         card_id = self._card_id_from_target(target)
+        metadata = metadata or {}
+
+        # Loop-Prävention: interne Gateway-Meldungen nicht als Deck-Kommentar
+        # spiegeln. Lifecycle → still verwerfen (Deck hat kein Presence-Konzept),
+        # suppress → still verwerfen, error → als Kommentar mit Fehler-Präfix.
+        category, details = categorize_gateway_message(content)
+        if category == "suppress":
+            logger.debug("Deck: suppressed internal gateway message (%s)", details.get("state", "noise"))
+            return SendResult(success=True)
+        if category == "lifecycle":
+            logger.info("Deck: gateway lifecycle notice suppressed (%s)", details.get("state"))
+            return SendResult(success=True)
+        if category == "error":
+            content = f"🚫 **Fehler**\n\n{content}"
+
+        # Karten-Aktionen via metadata (Beschreibung-Update, Status-Move)
+        new_description = metadata.get("description") or metadata.get("new_description")
+        target_status = metadata.get("target_status")
+
+        if target_status:
+            moved = await self._move_card_to_status(card_id, str(target_status))
+            if not moved:
+                return SendResult(success=False, error=f"Could not move card {card_id} to status '{target_status}'")
+
+        if new_description:
+            updated = await self._update_card_description(card_id, str(new_description))
+            if not updated:
+                return SendResult(success=False, error=f"Could not update description of card {card_id}")
+
+        if content:
+            try:
+                result = await self.client.add_comment(card_id, content)
+            except NextcloudDeckError as exc:
+                logger.warning("Deck comment write failed for card %s: %s", card_id, exc)
+                return SendResult(success=False, error=str(exc))
+            return SendResult(
+                success=result is not None,
+                message_id=str(result.get("id")) if isinstance(result, dict) and result.get("id") else None,
+                error=None if result is not None else "Deck did not return a comment",
+            )
+
+        # Nur Karten-Aktionen, kein Kommentar-Inhalt
+        if target_status or new_description:
+            return SendResult(success=True)
+        return SendResult(success=False, error="Empty message and no card action metadata")
+
+    async def _update_card_description(self, card_id: str, description: str) -> bool:
+        """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards)."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False
+        board_id, stack_id = location
         try:
-            result = await self.client.add_comment(card_id, content)
+            result = await self.client.update_card(board_id, stack_id, card_id, description=description)
+            return result is not None
         except NextcloudDeckError as exc:
-            logger.warning("Deck comment write failed for card %s: %s", card_id, exc)
-            return SendResult(success=False, error=str(exc))
-        return SendResult(
-            success=result is not None,
-            message_id=str(result.get("id")) if isinstance(result, dict) and result.get("id") else None,
-            error=None if result is not None else "Deck did not return a comment",
-        )
+            logger.warning("Deck description update failed for card %s: %s", card_id, exc)
+            return False
+
+    async def _move_card_to_status(self, card_id: str, status_key: str) -> bool:
+        """Verschiebt die Karte in den Ziel-Stack (Status-Mapping aus der Board-Konfiguration)."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False
+        board_id, stack_id = location
+
+        # Ziel-Stack ermitteln: Board-Konfiguration (status_mapping) oder Stack-Titel-Match
+        target_stack_id = await self._resolve_target_stack_id(board_id, status_key)
+        if not target_stack_id:
+            logger.warning("Deck: kein Ziel-Stack für Status '%s' in Board %s konfiguriert", status_key, board_id)
+            return False
+
+        try:
+            result = await self.client.move_card(board_id, stack_id, card_id, target_stack_id)
+            return result is not None
+        except NextcloudDeckError as exc:
+            logger.warning("Deck card move failed for card %s: %s", card_id, exc)
+            return False
+
+    async def _locate_card(self, card_id: str) -> Optional[tuple[str, str]]:
+        """Findet (board_id, stack_id) einer Karte über die konfigurierten Boards."""
+        try:
+            boards = await self.client.get_boards()
+        except NextcloudDeckError as exc:
+            logger.warning("Deck: Boards konnten nicht geladen werden: %s", exc)
+            return None
+        for board in boards if isinstance(boards, list) else []:
+            board_id = str(board.get("id") or "").strip()
+            if not board_id or (self.runtime.boards and board_id not in self.runtime.boards):
+                continue
+            try:
+                stacks = await self.client.get_stacks(board_id)
+            except NextcloudDeckError:
+                continue
+            for stack in stacks if isinstance(stacks, list) else []:
+                stack_id = str(stack.get("id") or "").strip()
+                for card in stack.get("cards") or []:
+                    if str(card.get("id") or "") == card_id:
+                        return board_id, stack_id
+        return None
+
+    async def _resolve_target_stack_id(self, board_id: str, status_key: str) -> Optional[str]:
+        """Löst einen Status-Schlüssel zu einer Stack-ID auf (Board-Config 'status_mapping' oder Stack-Titel)."""
+        config = self._configured_board(board_id) or {}
+        mapping = config.get("status_mapping") or config.get("stack_mapping") or {}
+        if isinstance(mapping, dict):
+            target = mapping.get(status_key) or mapping.get(status_key.lower())
+            if target:
+                return str(target).strip()
+
+        # Fallback: Stack-Titel-Match (case-insensitive)
+        try:
+            stacks = await self.client.get_stacks(board_id)
+        except NextcloudDeckError:
+            return None
+        for stack in stacks if isinstance(stacks, list) else []:
+            title = str(stack.get("title") or "").strip().casefold()
+            if title == status_key.strip().casefold():
+                return str(stack.get("id") or "").strip() or None
+        return None
 
     async def send_message(
         self,
@@ -249,6 +385,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         needles = {
             self.runtime.hermes_user_id.lower(),
             self.runtime.username.lower(),
+            *self.runtime.bot_aliases,
         }
         description = str(card.get("description") or "").lower()
         if any(needle and needle in description for needle in needles):
@@ -294,7 +431,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if last_author and (
             last_author == self.runtime.username
             or last_author == self.runtime.hermes_user_id
-            or last_author.lower() in {"system", "changelog", "sample"}
+            or last_author.lower() in {*self.runtime.bot_aliases, "system", "changelog", "sample"}
         ):
             logger.debug("Nextcloud Deck: Ignoriere eigenen oder System-Kommentar (Author: %s)", last_author)
             return
@@ -332,7 +469,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not self.state.should_process(snapshot):
             return
 
-        actor_id, groups = self.identity.resolve_card_actor(card, last_author)
+        actor_id, groups = await self.identity.resolve_card_actor(card, last_author)
         self.identity.set_contextvars_identity(actor_id, groups)
 
         session_key = f"deck:board:{board_id}:card:{card_id}"
@@ -345,7 +482,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             message_id=card_id,
         )
         if isinstance(source, dict):
-            source["extra_headers"] = {"X-On-Behalf-Of": actor_id}
+            source["extra_headers"] = {
+                "X-On-Behalf-Of": actor_id,
+                "X-User-Groups": ",".join(groups),
+            }
 
         text = f"Nextcloud Deck Karte: {snapshot.title}\nBeschreibung:\n{snapshot.description}"
         if last and last.get("message"):

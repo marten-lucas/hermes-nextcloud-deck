@@ -64,6 +64,12 @@ class NextcloudDeckClient:
             path.lstrip("/"),
         )
 
+    def cloud_ocs_url(self, path: str) -> str:
+        return urljoin(
+            f"{self.base_url}/ocs/v1.php/cloud/",
+            path.lstrip("/"),
+        )
+
     @staticmethod
     def _unwrap(body: Any) -> Any:
         if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
@@ -165,3 +171,26 @@ class NextcloudDeckClient:
             json=payload,
         )
         return data if isinstance(data, dict) else None
+
+    async def cloud_ocs_get(self, path: str) -> Any:
+        """GET auf die Cloud Provisioning API (v1), z. B. users/{uid}/groups."""
+        session = await self.ensure_session()
+        url = self.cloud_ocs_url(path)
+        try:
+            async with session.get(url, headers=self.headers(), params={"format": "json"}) as resp:
+                raw = await resp.text()
+                if resp.status >= 400:
+                    raise NextcloudDeckError(
+                        f"Cloud OCS GET {path} failed with HTTP {resp.status}: {raw[:500]}"
+                    )
+                if not raw:
+                    return None
+                try:
+                    body = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise NextcloudDeckError(f"Cloud OCS returned non-JSON for {path}: {raw[:500]}") from exc
+                if isinstance(body, dict) and isinstance(body.get("ocs"), dict):
+                    return body["ocs"].get("data")
+                return body
+        except aiohttp.ClientError as exc:
+            raise NextcloudDeckError(f"Cloud OCS connection failed for {path}: {exc}") from exc
