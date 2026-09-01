@@ -117,6 +117,24 @@ class NextcloudDeckClient:
         data = await self._request("GET", f"boards/{board_id}/stacks")
         return data if isinstance(data, list) else []
 
+    async def get_card(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        card_id: str | int,
+    ) -> Optional[Dict[str, Any]]:
+        """Lädt eine einzelne Karte über den unterstützten REST-Pfad.
+
+        Hinweis: `GET cards/{id}` wird von der Deck-REST-API (v1.0) nicht
+        angeboten (HTTP 405). Einzelkarten sind nur verschachtelt unter
+        `boards/{b}/stacks/{s}/cards/{id}` erreichbar.
+        """
+        data = await self._request(
+            "GET",
+            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}",
+        )
+        return data if isinstance(data, dict) else None
+
     async def get_card_comments(self, card_id: str | int) -> List[Dict[str, Any]]:
         data = await self._request("GET", f"cards/{card_id}/comments", use_ocs=True)
         return data if isinstance(data, list) else []
