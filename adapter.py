@@ -79,9 +79,46 @@ class DeckRuntimeConfig:
     bot_aliases: tuple[str, ...] = ()
 
 
+def _load_dotenv_fallback() -> Dict[str, str]:
+    """Liest ~/.hermes/.env als Fallback ein (einmalig gecached).
+
+    Der Gateway-Prozess lädt die .env via dotenv in os.environ — aber
+    Status-Konsumenten (Dashboard, `hermes status`) sind separate Prozesse.
+    Damit is_connected()/check_is_connected() dort dieselbe Antwort liefern
+    wie zur Gateway-Startzeit, wird die .env direkt gelesen.
+    """
+    global _DOTENV_CACHE
+    if _DOTENV_CACHE is not None:
+        return _DOTENV_CACHE
+    values: Dict[str, str] = {}
+    try:
+        env_path = Path.home() / ".hermes" / ".env"
+        if env_path.is_file():
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, raw = line.partition("=")
+                key = key.strip()
+                raw = raw.strip().strip('"').strip("'")
+                if key and raw:
+                    values.setdefault(key, raw)
+    except Exception:
+        pass
+    _DOTENV_CACHE = values
+    return values
+
+
+_DOTENV_CACHE: Optional[Dict[str, str]] = None
+
+
 def _env(name: str, *fallbacks: str) -> str:
+    dotenv = _load_dotenv_fallback()
     for key in (name, *fallbacks):
         value = os.getenv(key, "").strip()
+        if value:
+            return value
+        value = dotenv.get(key, "").strip()
         if value:
             return value
     return ""
