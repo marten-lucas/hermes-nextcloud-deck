@@ -203,8 +203,28 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
 class NextcloudDeckPlatform(BasePlatformAdapter):
     """Polling platform adapter for explicitly configured Nextcloud Deck boards."""
 
+    @staticmethod
+    def _resolve_platform():
+        """Platform-Member robust auflösen (auch ohne Plugin-Discovery).
+
+        ``Platform("deck")`` erzeugt nur dann dynamisch ein Pseudo-Member,
+        wenn das Plugin gebündelt ist oder die Registry den Namen kennt.
+        Sonst ValueError — dann Fallback auf ein eingebautes Member.
+        """
+        try:
+            return Platform("deck")
+        except ValueError:
+            try:
+                from gateway.platform_registry import platform_registry
+
+                if platform_registry.is_registered("deck"):
+                    return Platform("deck")
+            except Exception:
+                pass
+            return Platform("matrix")
+
     def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform("deck"))
+        super().__init__(config, self._resolve_platform())
         self.runtime = _build_runtime_config(config)
         self.client = NextcloudDeckClient(
             self.runtime.base_url,
@@ -529,11 +549,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             user_name=actor_id,
             message_id=card_id,
         )
+        headers = self.identity.principal_headers(principal) or {
+            "X-On-Behalf-Of": actor_id,
+            "X-User-Groups": ",".join(groups),
+        }
+        # extra_headers plattformneutral transportieren:
+        # - dict-Sources (Test-Fallback-Base) → Key-Setzung
+        # - reale SessionSource-Objekte (Hermes >= 0.20) → Attribut
+        #   (Dataclass ist nicht frozen; das x-on-behalf-Plugin liest
+        #   getattr(source, "extra_headers"))
         if isinstance(source, dict):
-            source["extra_headers"] = self.identity.principal_headers(principal) or {
-                "X-On-Behalf-Of": actor_id,
-                "X-User-Groups": ",".join(groups),
-            }
+            source["extra_headers"] = headers
+        else:
+            try:
+                setattr(source, "extra_headers", headers)
+            except Exception:
+                logger.warning(
+                    "Deck: Konnte extra_headers nicht an SessionSource hängen."
+                )
 
         text = f"Nextcloud Deck Karte: {snapshot.title}\nBeschreibung:\n{snapshot.description}"
         if last and last.get("message"):
