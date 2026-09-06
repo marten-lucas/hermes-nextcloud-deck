@@ -46,6 +46,11 @@ def _uid_from_assignee(value: Any) -> str:
     if isinstance(value, dict):
         participant = value.get("participant")
         if isinstance(participant, dict):
+            # Echte Deck-API-Struktur: participant.uid / participant.primaryKey
+            # (z.B. {"id": 43, "participant": {"uid": "ki_assistent", ...}})
+            for key in ("uid", "primaryKey", "userId"):
+                if participant.get(key):
+                    return str(participant[key]).strip()
             user = participant.get("user")
             if isinstance(user, dict) and user.get("uid"):
                 return str(user["uid"]).strip()
