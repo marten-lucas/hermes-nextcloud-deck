@@ -7,18 +7,19 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Lazy-Import der ContextVars aus hermes-x-on-behalf (optional installiert)
-_xonbehalf_vars: Optional[tuple] = None
+# Lazy-Import des hermes-x-on-behalf-Pakets (optional installiert)
+_xonbehalf = None
 
 
-def _get_xonbehalf_vars() -> Optional[tuple]:
-    """Lädt (current_user_id, current_user_groups) aus hermes-x-on-behalf, falls verfügbar."""
-    global _xonbehalf_vars
-    if _xonbehalf_vars is not None:
-        return _xonbehalf_vars
+def _get_xonbehalf():
+    """Lädt das hermes-x-on-behalf-Paket, falls verfügbar (optional dependency)."""
+    global _xonbehalf
+    if _xonbehalf is not None:
+        return _xonbehalf
     try:
-        from hermes_x_on_behalf.plugin import current_user_id, current_user_groups
-        _xonbehalf_vars = (current_user_id, current_user_groups)
+        import hermes_x_on_behalf
+
+        _xonbehalf = hermes_x_on_behalf
     except Exception:
         try:
             # Fallback: Plugin-Verzeichnis liegt als Schwesterprojekt im Workspace
@@ -32,14 +33,13 @@ def _get_xonbehalf_vars() -> Optional[tuple]:
                 pkg = types.ModuleType("hermes_x_on_behalf")
                 pkg.__path__ = [plugin_path]
                 sys.modules.setdefault("hermes_x_on_behalf", pkg)
-                plugin_mod = importlib.import_module("hermes_x_on_behalf.plugin")
-                _xonbehalf_vars = (plugin_mod.current_user_id, plugin_mod.current_user_groups)
+                _xonbehalf = importlib.import_module("hermes_x_on_behalf")
             else:
-                _xonbehalf_vars = (None, None)
+                return None
         except Exception as exc:
-            logger.debug(f"hermes-x-on-behalf ContextVars nicht verfügbar: {exc}")
-            _xonbehalf_vars = (None, None)
-    return _xonbehalf_vars
+            logger.debug(f"hermes-x-on-behalf nicht verfügbar: {exc}")
+            return None
+    return _xonbehalf
 
 
 def _uid_from_assignee(value: Any) -> str:
@@ -58,8 +58,15 @@ def _uid_from_assignee(value: Any) -> str:
 class DeckIdentityResolver:
     """Resolve the actor used for Hermes' execution context."""
 
-    def __init__(self, bot_user_id: str, client: Any = None, cache_ttl_seconds: int = 120):
+    def __init__(
+        self,
+        bot_user_id: str,
+        client: Any = None,
+        cache_ttl_seconds: int = 120,
+        bot_aliases: Iterable[str] = (),
+    ):
         self.bot_user_id = str(bot_user_id or "").strip()
+        self.bot_aliases = {str(a).strip().lower() for a in bot_aliases if str(a).strip()}
         self.client = client
         self.cache_ttl_seconds = cache_ttl_seconds
         self._group_cache: Dict[str, tuple[float, Set[str]]] = {}
@@ -110,12 +117,16 @@ class DeckIdentityResolver:
         self,
         card_data: Dict[str, Any],
         comment_author: Optional[str] = None,
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], bool]:
         """Ermittelt den Actor im Namen dessen Hermes handelt.
 
         Priorität: Kommentar-Autor (echter Mensch) → Fallback-User.
         Ist der Bot selbst letzter Autor, wird der Fallback-User verwendet,
         damit Hermes nie "als sich selbst" handelt.
+
+        Returns (actor_id, groups, is_fallback): is_fallback=True markiert
+        System-/Fallback-Actors — diese werden zu kind=system-Principals
+        (niemals Personal-/Team-Memory).
         """
         fallback = (
             os.getenv("MCP_IDENTITY_FALLBACK_USER", "").strip()
@@ -124,35 +135,64 @@ class DeckIdentityResolver:
         )
 
         author = str(comment_author).strip() if comment_author else ""
-        bot_ids = {self.bot_user_id.lower(), "ki_assistent", "ki gerda"}
+        bot_ids = {self.bot_user_id.lower(), *self.bot_aliases}
         if not author or author.lower() in bot_ids:
-            return fallback, []
+            return fallback, [], True
 
         groups = await self.get_user_groups(author)
-        return author, sorted(groups)
+        return author, sorted(groups), False
 
     @staticmethod
-    def set_contextvars_identity(user_id: str, groups: Iterable[str] = ()) -> None:
-        """Setzt die ContextVars von hermes-x-on-behalf für die HTTP-Header-Injektion."""
-        vars_pair = _get_xonbehalf_vars()
-        if vars_pair is None or vars_pair[0] is None:
-            return
-        current_user_id, current_user_groups = vars_pair
+    def build_principal(
+        user_id: str,
+        groups: Iterable[str] = (),
+        board_id: Optional[str] = None,
+        card_id: Optional[str] = None,
+        is_fallback: bool = False,
+    ):
+        """Baut einen PrincipalContext für ein Deck-Event (Kommentar-Autor als Actor).
+
+        Fallback-/System-Actors (is_fallback=True) werden zu kind=system-
+        Principals — sie erhalten niemals Personal- oder Team-Memory.
+
+        Deck-Routing läuft über die explizite conversation_scopes-Liste in der
+        Hermes-Konfiguration — Board-Titel werden bewusst nicht für Memory-
+        Tags geparst (Titel gehören dem User).
+        """
+        xob = _get_xonbehalf()
+        if xob is None or not user_id:
+            return None
         try:
-            current_user_id.set(str(user_id) if user_id else None)
-            current_user_groups.set(",".join(sorted(str(g) for g in groups if str(g).strip())) or None)
+            if is_fallback:
+                return xob.PrincipalContext.system(str(user_id))
+            conversation_id = None
+            if board_id and card_id:
+                conversation_id = f"deck:board:{board_id}:card:{card_id}"
+            elif board_id:
+                conversation_id = f"deck:board:{board_id}"
+            return xob.PrincipalContext.interactive(
+                user_id=str(user_id),
+                groups=groups,
+                conversation_id=conversation_id,
+                channel="nextcloud-deck",
+            )
         except Exception as exc:
-            logger.debug(f"Konnte Identity-ContextVars nicht setzen: {exc}")
+            logger.debug(f"Konnte PrincipalContext nicht bauen: {exc}")
+            return None
 
     @staticmethod
-    def clear_contextvars_identity() -> None:
-        """Räumt die Identity-ContextVars auf."""
-        vars_pair = _get_xonbehalf_vars()
-        if vars_pair is None or vars_pair[0] is None:
-            return
-        current_user_id, current_user_groups = vars_pair
+    def principal_context(principal):
+        """Context-Manager mit Token-basiertem Set/Reset (leak-proof)."""
+        xob = _get_xonbehalf()
+        return xob.principal_context(principal)
+
+    @staticmethod
+    def principal_headers(principal) -> Dict[str, str]:
+        """Leitet die Propagation-Header aus dem PrincipalContext ab."""
+        xob = _get_xonbehalf()
+        if xob is None or principal is None:
+            return {}
         try:
-            current_user_id.set(None)
-            current_user_groups.set(None)
-        except Exception as exc:
-            logger.debug(f"Konnte Identity-ContextVars nicht leeren: {exc}")
+            return xob.principal_to_headers(principal)
+        except Exception:
+            return {}

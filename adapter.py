@@ -174,7 +174,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             self.runtime.username,
             self.runtime.app_password,
         )
-        self.identity = DeckIdentityResolver(self.runtime.hermes_user_id, client=self.client)
+        self.identity = DeckIdentityResolver(
+            self.runtime.hermes_user_id,
+            client=self.client,
+            bot_aliases=self.runtime.bot_aliases,
+        )
         self.state = DeckStateManager()
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
@@ -469,8 +473,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not self.state.should_process(snapshot):
             return
 
-        actor_id, groups = await self.identity.resolve_card_actor(card, last_author)
-        self.identity.set_contextvars_identity(actor_id, groups)
+        actor_id, groups, is_fallback = await self.identity.resolve_card_actor(card, last_author)
+
+        principal = self.identity.build_principal(
+            user_id=actor_id,
+            groups=groups,
+            board_id=str(board_id),
+            card_id=str(card_id),
+            is_fallback=is_fallback,
+        )
 
         session_key = f"deck:board:{board_id}:card:{card_id}"
         source = self.build_source(
@@ -482,7 +493,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             message_id=card_id,
         )
         if isinstance(source, dict):
-            source["extra_headers"] = {
+            source["extra_headers"] = self.identity.principal_headers(principal) or {
                 "X-On-Behalf-Of": actor_id,
                 "X-User-Groups": ",".join(groups),
             }
@@ -505,7 +516,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             user_id=actor_id,
             user_name=actor_id,
         )
-        result = self.handle_message(event)
+        result = None
+        if principal is not None:
+            with self.identity.principal_context(principal):
+                result = self.handle_message(event)
+        else:
+            result = self.handle_message(event)
         if asyncio.iscoroutine(result):
             await result
 

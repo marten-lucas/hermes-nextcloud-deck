@@ -30,10 +30,11 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
             os.environ["MCP_IDENTITY_FALLBACK_USER"] = "cronjob-user"
             resolver = DeckIdentityResolver(bot_user_id="hermes")
             card = {"assignedUsers": [{"uid": "hermes"}]}
-            actor, groups = await resolver.resolve_card_actor(card, comment_author="hermes")
+            actor, groups, is_fallback = await resolver.resolve_card_actor(card, comment_author="hermes")
             # Bot als letzter Autor → Fallback-User statt Bot selbst (X-On-Behalf-Semantik)
             self.assertEqual(actor, "cronjob-user")
             self.assertEqual(groups, [])
+            self.assertTrue(is_fallback)
         finally:
             if original is None:
                 os.environ.pop("MCP_IDENTITY_FALLBACK_USER", None)
@@ -43,8 +44,26 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
     async def test_identity_resolver_comment_author(self):
         resolver = DeckIdentityResolver(bot_user_id="hermes")
         card = {"assignedUsers": [{"uid": "bob"}]}
-        actor, _ = await resolver.resolve_card_actor(card, comment_author="alice")
+        actor, _, is_fallback = await resolver.resolve_card_actor(card, comment_author="alice")
         self.assertEqual(actor, "alice")
+        self.assertFalse(is_fallback)
+
+    async def test_identity_resolver_bot_alias_uses_fallback(self):
+        resolver = DeckIdentityResolver(bot_user_id="hermes", bot_aliases=["ki_assistent"])
+        card = {"assignedUsers": []}
+        actor, _, is_fallback = await resolver.resolve_card_actor(card, comment_author="KI_Assistent")
+        self.assertTrue(is_fallback)
+        self.assertNotEqual(actor, "ki_assistent")
+
+    def test_fallback_actor_builds_system_principal(self):
+        principal = DeckIdentityResolver.build_principal(
+            "cronjob-user", board_id="3", card_id="44", is_fallback=True
+        )
+        if principal is None:
+            self.skipTest("hermes-x-on-behalf nicht verfügbar")
+        self.assertTrue(principal.is_system)
+        self.assertFalse(principal.is_interactive)
+        self.assertIsNone(principal.conversation_id)
 
     def test_state_manager_deduplication_and_change_detection(self):
         mgr = DeckStateManager()

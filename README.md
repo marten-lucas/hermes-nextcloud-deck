@@ -104,10 +104,24 @@ they are structural operations, not chat messages.
 
 The adapter resolves the human actor behind a card trigger (comment author
 priority, fallback via `MCP_IDENTITY_FALLBACK_USER` → `NEXTCLOUD_DECK_USERNAME`)
-and propagates identity to downstream MCP tools:
+and propagates identity to downstream MCP tools via the `hermes-x-on-behalf`
+plugin:
 
-- `X-On-Behalf-Of` / `X-User-Groups` headers on the session source
-- ContextVars consumed by the `hermes-x-on-behalf` plugin's HTTP interceptors
+- A `PrincipalContext` (user, groups, conversation `deck:board:<id>:card:<id>`)
+  is built per card event and applied with a token-based context manager
+  (leak-proof reset after processing)
+- **Fallback actors** (no human comment author, or the bot itself — matched via
+  `hermes_user_id` and the configured `bot_aliases`) become `kind=system`
+  principals: they never receive personal or team memory and carry no
+  conversation id. This prevents unrelated card events from piling into the
+  bot account's personal memory scope.
+- Derived `X-On-Behalf-Of` / `X-User-Groups` headers on the session source
+- ContextVars consumed by the plugin's HTTP interceptors
+- The conversation id `deck:board:<id>:card:<id>` participates in deterministic
+  memory routing via the explicit `memory.conversation_scopes` list in
+  `~/.hermes/config.yaml` (board titles are user-owned and are NOT parsed for
+  memory tags). Prefix matching respects segment boundaries: `deck:board:3`
+  matches `deck:board:3:card:44` but not `deck:board:30`.
 
 ## License
 
