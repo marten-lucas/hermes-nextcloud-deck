@@ -484,6 +484,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not self._card_is_triggered(card, comments):
             return
 
+        # Deck-API liefert Kommentare absteigend (neueste zuerst) — für eine
+        # deterministische "neuester Kommentar"-Logik explizit aufsteigend nach
+        # numerischer ID sortieren (gleicher Bug-Typ wie Talk-Fix f9f057b).
+        comments = sorted(
+            comments,
+            key=lambda c: int(str(c.get("id") or 0) or 0) if str(c.get("id") or 0).isdigit() else 0,
+        )
         last = comments[-1] if comments else {}
         last_author = self._last_comment_author(last) if last else None
 
