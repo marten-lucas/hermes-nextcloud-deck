@@ -287,11 +287,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     async def send(
         self,
-        target: str,
+        chat_id: str,
         content: str,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
+        # Basis-Signatur: send(chat_id, content, reply_to, metadata). Der
+        # Gateway ruft mit chat_id=... auf; der alte Positional-Name 'target'
+        # bleibt als chat_id kompatibel (alt: send(target, text)).
+        target = chat_id
         del reply_to
         card_id = self._card_id_from_target(target)
         metadata = metadata or {}
