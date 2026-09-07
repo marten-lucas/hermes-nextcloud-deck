@@ -7,6 +7,8 @@ description: >
   plan/execute phases, human-in-the-loop gates, subtask tracking and metadata actions.
 author: Local Development
 entrypoint: adapter.py
+provides_hooks:
+  - pre_tool_call
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance"
