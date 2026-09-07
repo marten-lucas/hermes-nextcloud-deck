@@ -82,6 +82,36 @@ class DeckIdentityResolver:
             return []
         return [uid for uid in (_uid_from_assignee(v) for v in raw) if uid]
 
+    async def resolve_user_uid(self, query: str) -> Optional[str]:
+        """Löst einen Usernamen/Display-Namen zu einer Nextcloud-UID auf.
+
+        - Exakter UID-Treffer (Provisioning ``users/{query}`` liefert Daten)
+          wird unverändert zurückgegeben.
+        - Sonst Suche über ``users?search=`` (erster Treffer).
+        - Kein Client/Treffer -> None (Aufrufer behält das Roh-Query bei).
+        """
+        query = str(query or "").strip()
+        if not query or self.client is None:
+            return None
+        try:
+            if hasattr(self.client, "cloud_ocs_get"):
+                direct = await self.client.cloud_ocs_get(f"users/{query}")
+                if isinstance(direct, dict) and direct.get("id"):
+                    return str(direct["id"]).strip()
+                if isinstance(direct, dict) and (direct.get("displayname") or direct.get("email")):
+                    return query
+
+                results = await self.client.cloud_ocs_get(f"users?search={query}")
+                users = (
+                    results.get("users", []) if isinstance(results, dict) else (results if isinstance(results, list) else [])
+                )
+                for u in users:
+                    if isinstance(u, dict) and u.get("id"):
+                        return str(u["id"]).strip()
+        except Exception as exc:
+            logger.debug(f"Konnte UID für '{query}' nicht auflösen: {exc}")
+        return None
+
     async def get_user_groups(self, user_id: str) -> Set[str]:
         """Ruft Nextcloud-Gruppen des Users ab (Provisioning API v1, TTL-Cache, graceful fallback)."""
         if not user_id or user_id == self.bot_user_id or self.client is None:

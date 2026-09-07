@@ -12,11 +12,49 @@ try:
     from .identity import DeckIdentityResolver
     from .outbound import categorize_gateway_message
     from .state import DeckCardSnapshot, DeckStateManager
+    from .workflow import (
+        APPROVAL_APPROVED,
+        LABEL_PREFIX_APPROVAL,
+        LABEL_PREFIX_PHASE,
+        PHASE_EXECUTE,
+        PHASE_PLAN,
+        build_capabilities_prompt,
+        check_agent_label_gate,
+        check_agent_status_gate,
+        compile_destructive_patterns,
+        current_deck_context,
+        check_destructive_gate,
+        DeckWorkflowContext,
+        DestructiveToolBlocked,
+        analyze_board_suitability,
+        extract_hermes_labels,
+        is_backlog_stack,
+        parse_subtasks,
+    )
 except ImportError:  # direct test/import
     from client import NextcloudDeckClient, NextcloudDeckError
     from identity import DeckIdentityResolver
     from outbound import categorize_gateway_message
     from state import DeckCardSnapshot, DeckStateManager
+    from workflow import (
+        APPROVAL_APPROVED,
+        LABEL_PREFIX_APPROVAL,
+        LABEL_PREFIX_PHASE,
+        PHASE_EXECUTE,
+        PHASE_PLAN,
+        build_capabilities_prompt,
+        check_agent_label_gate,
+        check_agent_status_gate,
+        compile_destructive_patterns,
+        current_deck_context,
+        check_destructive_gate,
+        DeckWorkflowContext,
+        DestructiveToolBlocked,
+        analyze_board_suitability,
+        extract_hermes_labels,
+        is_backlog_stack,
+        parse_subtasks,
+    )
 
 try:
     from gateway.config import Platform, PlatformConfig  # type: ignore
@@ -77,6 +115,7 @@ class DeckRuntimeConfig:
     boards: Dict[str, Dict[str, Any]]
     home_channel: Optional[str] = None
     bot_aliases: tuple[str, ...] = ()
+    destructive_tool_patterns: List[str] = None  # type: ignore[assignment]
 
 
 def _load_dotenv_fallback() -> Dict[str, str]:
@@ -188,6 +227,13 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     elif isinstance(raw_aliases, list):
         bot_aliases = tuple(str(a).strip().lower() for a in raw_aliases if str(a).strip())
 
+    raw_destructive = extra.get("destructive_tool_patterns")
+    destructive_patterns: List[str] = []
+    if isinstance(raw_destructive, str):
+        destructive_patterns = [p.strip() for p in raw_destructive.split(",") if p.strip()]
+    elif isinstance(raw_destructive, list):
+        destructive_patterns = [str(p).strip() for p in raw_destructive if str(p).strip()]
+
     return DeckRuntimeConfig(
         base_url=base_url,
         username=username,
@@ -197,6 +243,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         boards=boards,
         home_channel=home_channel,
         bot_aliases=bot_aliases,
+        destructive_tool_patterns=destructive_patterns,
     )
 
 
@@ -237,6 +284,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             bot_aliases=self.runtime.bot_aliases,
         )
         self.state = DeckStateManager()
+        self.destructive_patterns = compile_destructive_patterns(
+            self.runtime.destructive_tool_patterns
+        )
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -263,7 +313,42 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._connected = True
         if self._polling_task is None or self._polling_task.done():
             self._polling_task = asyncio.create_task(self._polling_loop())
+        # Board-Eignung prüfen und bei Problemen laut loggen (kein Abbruch —
+        # ein ungeeignetes Board darf das Gateway nicht blockieren).
+        await self.check_board_suitability()
         return True
+
+    async def check_board_suitability(self) -> List[Any]:
+        """Prüft alle konfigurierten Boards auf Workflow-Eignung und loggt Reports.
+
+        Rückgabe: Liste der BoardSuitabilityResult-Objekte.
+        """
+        results: List[Any] = []
+        try:
+            boards = await self.client.get_boards()
+        except NextcloudDeckError as exc:
+            logger.warning("Deck: Board-Eignungsprüfung übersprungen (Boards nicht ladbar): %s", exc)
+            return results
+
+        for board in boards if isinstance(boards, list) else []:
+            board_id = str(board.get("id") or "").strip()
+            if not board_id or (self.runtime.boards and board_id not in self.runtime.boards):
+                continue
+            board_title = str(board.get("title") or board_id)
+            try:
+                stacks = await self.client.get_stacks(board_id)
+            except NextcloudDeckError as exc:
+                logger.warning("Deck: Spalten von Board %s nicht ladbar: %s", board_id, exc)
+                continue
+
+            config = self._configured_board(board_id)
+            result = analyze_board_suitability(board_id, board_title, stacks, config)
+            results.append(result)
+            if result.is_suitable:
+                logger.info("Deck Board-Eignung OK:\n%s", result.format_report())
+            else:
+                logger.warning("Deck Board NICHT geeignet (fehlende Pflicht-Spalten):\n%s", result.format_report())
+        return results
 
     async def disconnect(self) -> None:
         self._stop_event.set()
@@ -314,19 +399,63 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if category == "error":
             content = f"🚫 **Fehler**\n\n{content}"
 
-        # Karten-Aktionen via metadata (Beschreibung-Update, Status-Move)
+        # Karten-Aktionen via metadata (Beschreibung-Update, Status-Move, Labels, Assignee)
         new_description = metadata.get("description") or metadata.get("new_description")
         target_status = metadata.get("target_status")
+        assign_labels = metadata.get("assign_labels") or metadata.get("assign_label")
+        remove_labels = metadata.get("remove_labels") or metadata.get("remove_label")
+        assign_user = metadata.get("assign_user") or metadata.get("assign_users")
+        unassign_user = metadata.get("unassign_user") or metadata.get("unassign_users")
+
+        card_action_taken = False
 
         if target_status:
-            moved = await self._move_card_to_status(card_id, str(target_status))
+            moved, err = await self._move_card_to_status(card_id, str(target_status))
             if not moved:
-                return SendResult(success=False, error=f"Could not move card {card_id} to status '{target_status}'")
+                # Bei einem Gate-Fehler posten wir den Grund als Kommentar, damit der Agent/User weiß, was passiert ist
+                if err and "Gate" in err:
+                    try:
+                        await self.client.add_comment(card_id, f"⚠️ **Workflow-Gate:** {err}")
+                    except Exception:
+                        pass
+                return SendResult(success=False, error=err or f"Could not move card {card_id} to status '{target_status}'")
+            card_action_taken = True
 
         if new_description:
             updated = await self._update_card_description(card_id, str(new_description))
             if not updated:
                 return SendResult(success=False, error=f"Could not update description of card {card_id}")
+            card_action_taken = True
+
+        if assign_labels:
+            labels_list = [assign_labels] if isinstance(assign_labels, str) else list(assign_labels)
+            for lbl in labels_list:
+                applied, err = await self._apply_label_to_card(card_id, str(lbl))
+                if not applied and err:
+                    logger.warning("Deck: Label '%s' konnte nicht gesetzt werden: %s", lbl, err)
+                elif applied:
+                    card_action_taken = True
+
+        if remove_labels:
+            labels_list = [remove_labels] if isinstance(remove_labels, str) else list(remove_labels)
+            for lbl in labels_list:
+                removed = await self._remove_label_from_card(card_id, str(lbl))
+                if removed:
+                    card_action_taken = True
+
+        if assign_user:
+            users_list = [assign_user] if isinstance(assign_user, str) else list(assign_user)
+            for usr in users_list:
+                assigned = await self._assign_user_to_card(card_id, str(usr))
+                if assigned:
+                    card_action_taken = True
+
+        if unassign_user:
+            users_list = [unassign_user] if isinstance(unassign_user, str) else list(unassign_user)
+            for usr in users_list:
+                unassigned = await self._unassign_user_from_card(card_id, str(usr))
+                if unassigned:
+                    card_action_taken = True
 
         if content:
             try:
@@ -341,7 +470,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             )
 
         # Nur Karten-Aktionen, kein Kommentar-Inhalt
-        if target_status or new_description:
+        if card_action_taken:
             return SendResult(success=True)
         return SendResult(success=False, error="Empty message and no card action metadata")
 
@@ -358,24 +487,147 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.warning("Deck description update failed for card %s: %s", card_id, exc)
             return False
 
-    async def _move_card_to_status(self, card_id: str, status_key: str) -> bool:
-        """Verschiebt die Karte in den Ziel-Stack (Status-Mapping aus der Board-Konfiguration)."""
+    async def _move_card_to_status(self, card_id: str, status_key: str) -> tuple[bool, Optional[str]]:
+        """Verschiebt die Karte in den Ziel-Stack mit Berücksichtigung von Workflow-Gates."""
         location = await self._locate_card(card_id)
         if location is None:
-            return False
+            return False, f"Card {card_id} could not be located"
         board_id, stack_id = location
+
+        # Karte laden, um aktuelle Phase / Approval-Status zu prüfen
+        current_card = await self.client.get_card(board_id, stack_id, card_id)
+        if current_card:
+            hermes_labels = extract_hermes_labels(current_card)
+            phase = hermes_labels.get("phase") or PHASE_PLAN
+            approval = hermes_labels.get("approval")
+            task_type = hermes_labels.get("type")
+            risk = hermes_labels.get("risk")
+            allowed, reason = check_agent_status_gate(status_key, phase, approval, task_type, risk)
+            if not allowed:
+                logger.warning("Deck: Gate-Sperre für Karte %s (Move nach '%s'): %s", card_id, status_key, reason)
+                return False, reason
 
         # Ziel-Stack ermitteln: Board-Konfiguration (status_mapping) oder Stack-Titel-Match
         target_stack_id = await self._resolve_target_stack_id(board_id, status_key)
         if not target_stack_id:
             logger.warning("Deck: kein Ziel-Stack für Status '%s' in Board %s konfiguriert", status_key, board_id)
-            return False
+            return False, f"No target stack found for status '{status_key}'"
 
         try:
             result = await self.client.move_card(board_id, stack_id, card_id, target_stack_id)
-            return result is not None
+            return (result is not None), None
         except NextcloudDeckError as exc:
             logger.warning("Deck card move failed for card %s: %s", card_id, exc)
+            return False, str(exc)
+
+    async def _apply_label_to_card(self, card_id: str, label_title: str) -> tuple[bool, Optional[str]]:
+        """Weist der Karte ein Label anhand des Titels zu (erstellt das Label bei Bedarf auf dem Board)."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False, "Card could not be located"
+        board_id, stack_id = location
+
+        current_card = await self.client.get_card(board_id, stack_id, card_id)
+        if current_card:
+            hermes_labels = extract_hermes_labels(current_card)
+            phase = hermes_labels.get("phase") or PHASE_PLAN
+            approval = hermes_labels.get("approval")
+            task_type = hermes_labels.get("type")
+            risk = hermes_labels.get("risk")
+            allowed, reason = check_agent_label_gate(label_title, phase, approval, task_type, risk)
+            if not allowed:
+                logger.warning("Deck: Label-Gate-Sperre für Karte %s: %s", card_id, reason)
+                return False, reason
+
+        board_labels = await self.client.get_board_labels(board_id)
+        target_label_id = None
+        for lbl in board_labels:
+            if str(lbl.get("title") or "").strip().lower() == label_title.strip().lower():
+                target_label_id = lbl.get("id")
+                break
+
+        # Wenn Label noch nicht auf dem Board existiert: anlegen
+        if target_label_id is None:
+            color = "317CCC"
+            if "approval:approved" in label_title.lower():
+                color = "31CC7C"  # grün
+            elif "risk:high" in label_title.lower() or "approval:required" in label_title.lower():
+                color = "FF7A66"  # rot/koralle
+            elif "phase:plan" in label_title.lower():
+                color = "F1DB50"  # gelb
+            new_lbl = await self.client.create_board_label(board_id, label_title, color=color)
+            if new_lbl and new_lbl.get("id"):
+                target_label_id = new_lbl["id"]
+
+        if target_label_id is None:
+            return False, f"Could not create/find label '{label_title}' on board {board_id}"
+
+        try:
+            res = await self.client.assign_label(board_id, stack_id, card_id, int(target_label_id))
+            return res is not None, None
+        except NextcloudDeckError as exc:
+            # Wenn bereits zugewiesen, als Erfolg werten
+            if "already assigned" in str(exc).lower():
+                return True, None
+            logger.warning("Deck assign_label failed for card %s: %s", card_id, exc)
+            return False, str(exc)
+
+    async def _remove_label_from_card(self, card_id: str, label_title: str) -> bool:
+        """Entfernt ein Label anhand des Titels von der Karte."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False
+        board_id, stack_id = location
+
+        board_labels = await self.client.get_board_labels(board_id)
+        target_label_id = None
+        for lbl in board_labels:
+            if str(lbl.get("title") or "").strip().lower() == label_title.strip().lower():
+                target_label_id = lbl.get("id")
+                break
+
+        if target_label_id is None:
+            return False
+
+        try:
+            res = await self.client.remove_label(board_id, stack_id, card_id, int(target_label_id))
+            return res is not None
+        except NextcloudDeckError as exc:
+            logger.warning("Deck remove_label failed for card %s: %s", card_id, exc)
+            return False
+
+    async def _assign_user_to_card(self, card_id: str, user_id: str) -> bool:
+        """Weist einen Benutzer der Karte zu (löst Username -> UID auf)."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False
+        board_id, stack_id = location
+
+        # Username/Display-Name -> Nextcloud-UID auflösen (Handoff an Menschen).
+        resolved = await self.identity.resolve_user_uid(user_id)
+        if resolved:
+            user_id = resolved
+
+        try:
+            res = await self.client.assign_user(board_id, stack_id, card_id, user_id)
+            return res is not None
+        except NextcloudDeckError as exc:
+            if "already assigned" in str(exc).lower():
+                return True
+            logger.warning("Deck assign_user failed for card %s: %s", card_id, exc)
+            return False
+
+    async def _unassign_user_from_card(self, card_id: str, user_id: str) -> bool:
+        """Entfernt einen Benutzer von der Karte."""
+        location = await self._locate_card(card_id)
+        if location is None:
+            return False
+        board_id, stack_id = location
+        try:
+            res = await self.client.unassign_user(board_id, stack_id, card_id, user_id)
+            return res is not None
+        except NextcloudDeckError as exc:
+            logger.warning("Deck unassign_user failed for card %s: %s", card_id, exc)
             return False
 
     async def _locate_card(self, card_id: str) -> Optional[tuple[str, str]]:
@@ -464,6 +716,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return False
 
     @staticmethod
+    def _card_label_titles(card: Dict[str, Any]) -> List[str]:
+        """Alle Label-Titel einer Karte (sortiert deterministisch)."""
+        titles = [
+            str(lbl.get("title") or "")
+            for lbl in (card.get("labels") or [])
+            if isinstance(lbl, dict) and lbl.get("title")
+        ]
+        return sorted(titles)
+
+    @staticmethod
     def _last_comment_author(comment: Dict[str, Any]) -> Optional[str]:
         for key in ("actorId", "actor", "author", "userId"):
             value = comment.get(key)
@@ -483,6 +745,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         stack_id = str(stack.get("id") or "").strip()
         card_id = str(card.get("id") or "").strip()
         if not board_id or not stack_id or not card_id:
+            return
+
+        # Backlog-Filter: Karten in der Backlog-Spalte sind reine Ideensammlungen
+        # und werden vom Agenten bewusst ignoriert, bis ein Mensch sie nach Triage/Todo zieht.
+        board_config = self._configured_board(board_id)
+        if is_backlog_stack(stack, board_config):
+            logger.debug("Nextcloud Deck: Karte %s liegt im Backlog ('%s') und wird ignoriert.", card_id, stack.get("title"))
             return
 
         comments = await self.client.get_card_comments(card_id)
@@ -526,6 +795,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return
         # -------------------------------------
 
+        label_titles = self._card_label_titles(card)
         snapshot = DeckCardSnapshot(
             board_id=board_id,
             stack_id=stack_id,
@@ -533,6 +803,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             title=str(card.get("title") or ""),
             description=str(card.get("description") or ""),
             assigned_users=self.identity.assigned_uids(card),
+            labels=label_titles,
             last_comment_id=str(last.get("id")) if last.get("id") else None,
             last_author=last_author,
             due_date=str(card.get("duedate")) if card.get("duedate") else None,
@@ -580,7 +851,31 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     "Deck: Konnte extra_headers nicht an SessionSource hängen."
                 )
 
-        text = f"Nextcloud Deck Karte: {snapshot.title}\nBeschreibung:\n{snapshot.description}"
+        stack_title = str(stack.get("title") or "").strip()
+        hermes_labels = extract_hermes_labels(card)
+        phase = hermes_labels.get("phase") or PHASE_PLAN
+        task_type = hermes_labels.get("type")
+        risk = hermes_labels.get("risk")
+        approval = hermes_labels.get("approval")
+
+        subtask_progress = parse_subtasks(snapshot.description)
+        capabilities_prompt = build_capabilities_prompt(
+            phase=phase,
+            task_type=task_type,
+            risk=risk,
+            approval=approval,
+        )
+
+        all_label_titles = self._card_label_titles(card)
+
+        text = (
+            f"Nextcloud Deck Karte: {snapshot.title}\n"
+            f"Aktuelle Spalte: {stack_title}\n"
+            f"Labels: {', '.join(all_label_titles) if all_label_titles else 'keine'}\n"
+            f"Subtasks: {subtask_progress.summary()}\n\n"
+            f"{capabilities_prompt}\n\n"
+            f"Beschreibung:\n{snapshot.description}"
+        )
         if last and last.get("message"):
             text += f"\n\nLetzter Kommentar von {last_author or 'unbekannt'}:\n{last['message']}"
 
@@ -593,19 +888,76 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 "stack": stack,
                 "card": card,
                 "comments": comments,
+                "hermes_workflow": {
+                    "phase": phase,
+                    "task_type": task_type,
+                    "risk": risk,
+                    "approval": approval,
+                    "subtask_progress": {
+                        "total": subtask_progress.total,
+                        "completed": subtask_progress.completed,
+                        "percentage": subtask_progress.percentage,
+                    },
+                },
             },
             message_id=card_id,
             user_id=actor_id,
             user_name=actor_id,
         )
         result = None
-        if principal is not None:
-            with self.identity.principal_context(principal):
+        workflow_ctx = DeckWorkflowContext(
+            board_id=str(board_id),
+            card_id=str(card_id),
+            phase=phase,
+            risk=risk or "low",
+            approval=approval,
+        )
+        token = current_deck_context.set(workflow_ctx)
+        try:
+            if principal is not None:
+                with self.identity.principal_context(principal):
+                    result = self.handle_message(event)
+            else:
                 result = self.handle_message(event)
-        else:
-            result = self.handle_message(event)
-        if asyncio.iscoroutine(result):
-            await result
+            if asyncio.iscoroutine(result):
+                await result
+        finally:
+            current_deck_context.reset(token)
+
+        # Nach erfolgreicher Verarbeitung die Dedup-Baseline auf den *aktuellen*
+        # Karten-Zustand setzen. Der Agent kann während handle_message selbst
+        # Labels/Description geändert haben — diese Änderungen sollen NICHT als
+        # neuer Trigger wirken, ein späterer menschenseitiger Wechsel aber schon.
+        await self._rebaseline_card(board_id, stack_id, card_id)
+
+    async def _rebaseline_card(self, board_id: str, stack_id: str, card_id: str) -> None:
+        """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu."""
+        try:
+            current = await self.client.get_card(board_id, stack_id, card_id)
+        except Exception:
+            return
+        if not current:
+            return
+        comments = await self.client.get_card_comments(card_id)
+        comments = sorted(
+            comments,
+            key=lambda c: int(str(c.get("id") or 0) or 0) if str(c.get("id") or 0).isdigit() else 0,
+        )
+        last = comments[-1] if comments else {}
+        fresh = DeckCardSnapshot(
+            board_id=board_id,
+            stack_id=stack_id,
+            card_id=card_id,
+            title=str(current.get("title") or ""),
+            description=str(current.get("description") or ""),
+            assigned_users=self.identity.assigned_uids(current),
+            labels=self._card_label_titles(current),
+            last_comment_id=str(last.get("id")) if last.get("id") else None,
+            last_author=self._last_comment_author(last) if last else None,
+            due_date=str(current.get("duedate")) if current.get("duedate") else None,
+            done=current.get("done"),
+        )
+        self.state.mark_processed(fresh)
 
     async def poll_once(self) -> int:
         boards = await self.client.get_boards()
@@ -703,6 +1055,26 @@ def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
     return NextcloudDeckPlatform(config)
 
 
+def _destructive_tool_hook(tool_name: str = "", args: Any = None, **kwargs: Any) -> Any:
+    """pre_tool_call-Hook: Gate 3 — destruktive Tools bei risk:high blocken.
+
+    Liest den aktiven Deck-Karten-Kontext (ContextVar) und blockt destruktive
+    Tool-Aufrufe, wenn die Karte risk:high trägt und keine Freigabe vorliegt.
+    Läuft ohne aktiven Deck-Kontext als No-Op (kein globaler Tool-Block).
+    """
+    workflow_ctx = current_deck_context.get()
+    if workflow_ctx is None:
+        return args if args is not None else kwargs.get("request") or kwargs.get("payload") or kwargs
+
+    patterns = compile_destructive_patterns()
+    allowed, reason = check_destructive_gate(tool_name, workflow_ctx, patterns)
+    if allowed:
+        return args if args is not None else kwargs.get("request") or kwargs.get("payload") or kwargs
+
+    logger.warning("Deck: %s", reason)
+    raise DestructiveToolBlocked(reason)
+
+
 def register(ctx: Any) -> None:
     ctx.register_platform(
         name="deck",
@@ -720,6 +1092,14 @@ def register(ctx: Any) -> None:
         max_message_length=16000,
         emoji="🎴",
     )
+
+    # Gate 3: destruktive Tool-Aufrufe bei risk:high technisch blocken
+    if hasattr(ctx, "register_hook"):
+        try:
+            ctx.register_hook("pre_tool_call", _destructive_tool_hook)
+            logger.info("Deck: 'pre_tool_call'-Hook für Gate 3 registriert.")
+        except Exception as exc:
+            logger.warning("Deck: Konnte Gate-3-Hook nicht registrieren: %s", exc)
 
     skills_dir = Path(__file__).parent / "skills"
     if skills_dir.is_dir():

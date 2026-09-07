@@ -190,6 +190,91 @@ class NextcloudDeckClient:
         )
         return data if isinstance(data, dict) else None
 
+    # --- Labels Endpoints ---
+
+    async def get_board_labels(self, board_id: str | int) -> List[Dict[str, Any]]:
+        """Gibt alle für das Board definierten Labels zurück."""
+        data = await self._request("GET", f"boards/{board_id}")
+        if isinstance(data, dict) and isinstance(data.get("labels"), list):
+            return data["labels"]
+        return []
+
+    async def create_board_label(
+        self,
+        board_id: str | int,
+        title: str,
+        color: str = "317CCC",
+    ) -> Optional[Dict[str, Any]]:
+        """Erstellt ein neues Label auf dem Board."""
+        data = await self._request(
+            "POST",
+            f"boards/{board_id}/labels",
+            json={"title": str(title)[:255], "color": str(color).lstrip("#")},
+        )
+        return data if isinstance(data, dict) else None
+
+    async def assign_label(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        card_id: str | int,
+        label_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Weist einer Karte ein Label zu."""
+        data = await self._request(
+            "PUT",
+            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/assignLabel",
+            json={"labelId": int(label_id)},
+        )
+        return data if isinstance(data, dict) else None
+
+    async def remove_label(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        card_id: str | int,
+        label_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Entfernt ein Label von einer Karte."""
+        data = await self._request(
+            "PUT",
+            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/removeLabel",
+            json={"labelId": int(label_id)},
+        )
+        return data if isinstance(data, dict) else None
+
+    # --- Assignee Endpoints ---
+
+    async def assign_user(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        card_id: str | int,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Weist einen Benutzer der Karte zu."""
+        data = await self._request(
+            "PUT",
+            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/assignUser",
+            json={"userId": str(user_id)},
+        )
+        return data if isinstance(data, dict) else None
+
+    async def unassign_user(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        card_id: str | int,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Entfernt einen Benutzer von der Karte."""
+        data = await self._request(
+            "PUT",
+            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/unassignUser",
+            json={"userId": str(user_id)},
+        )
+        return data if isinstance(data, dict) else None
+
     async def cloud_ocs_get(self, path: str) -> Any:
         """GET auf die Cloud Provisioning API (v1), z. B. users/{uid}/groups."""
         session = await self.ensure_session()

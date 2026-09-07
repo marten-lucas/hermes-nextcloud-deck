@@ -68,10 +68,24 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
     def test_state_manager_deduplication_and_change_detection(self):
         mgr = DeckStateManager()
         base = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
+        # Neuer Zustand -> sollte verarbeitet werden; danach Baseline setzen
         self.assertTrue(mgr.should_process(DeckCardSnapshot(**base)))
+        mgr.mark_processed(DeckCardSnapshot(**base))
+        # Identischer Zustand -> kein Re-Trigger
         self.assertFalse(mgr.should_process(DeckCardSnapshot(**base)))
+        # Beschreibung geändert -> neues Event
         changed = dict(base, description="Changed")
         self.assertTrue(mgr.should_process(DeckCardSnapshot(**changed)))
+
+    def test_state_manager_label_change_is_new_event(self):
+        mgr = DeckStateManager()
+        base = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
+        mgr.mark_processed(DeckCardSnapshot(**base))
+        # Identischer Zustand -> kein Re-Trigger
+        self.assertFalse(mgr.should_process(DeckCardSnapshot(**base)))
+        # Nur Label-Wechsel (Freigabe) -> neues Event, auch ohne Spaltenwechsel
+        approved = dict(base, labels=["hermes/approval:approved"])
+        self.assertTrue(mgr.should_process(DeckCardSnapshot(**approved)))
 
     def test_validate_deck_config_from_env(self):
         old = {k: os.environ.get(k) for k in (

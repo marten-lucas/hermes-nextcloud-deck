@@ -21,17 +21,21 @@ The integration is deliberately small and safe:
 .
 ├── __init__.py             # Plugin entrypoint (exports register)
 ├── adapter.py              # Core platform adapter: polling, triggers, send()
-├── client.py               # Nextcloud Deck REST client (+ cloud_ocs_get for provisioning)
+├── client.py               # Nextcloud Deck REST client (Cards, Stacks, Labels, Assignees, OCS)
+├── workflow.py             # Workflow, Phasen, Gates & Subtask-Logik (Konzept v5)
 ├── identity.py             # DeckIdentityResolver: actor resolution, group lookup, ContextVars
 ├── outbound.py             # Outbound message categorization (lifecycle/error/suppress/forward)
 ├── state.py                # Card snapshot & deduplication state
-├── plugin.yaml             # Plugin metadata
+├── plugin.yaml             # Plugin metadata (v0.5.0)
+├── docs/
+│   └── workflow-concept-v5.md # Vollständiges Workflow-Konzept
 ├── skills/
 │   └── nextcloud-deck/     # Bundled skill (namespaced via ctx.register_skill)
 │       └── SKILL.md
 └── tests/
     ├── test_phase1_adapter.py
-    └── test_platform_contract.py
+    ├── test_platform_contract.py
+    └── test_workflow_gates.py
 ```
 
 ## Installation
@@ -79,6 +83,22 @@ platform plugin. A `No skill named ... found in any source` result therefore doe
 not prove that the plugin itself failed to load. Verify plugin loading with
 `hermes plugins doctor` and inspect the plugin's local `skills/` directory directly.
 
+### Board suitability check
+
+On `connect()`, the adapter validates every configured board against the workflow
+model and logs a report. It resolves each canonical column
+(`Backlog` | `Triage` | `Todo` | `Ready` | `Running` | `Review` | `Blocked` | `Done`)
+via `stack_mapping` (by stack id **or** title) with an exact-title fallback, and
+warns loudly if a **required** column is missing. Required columns:
+
+- `running` — the agent works actively here
+- `review` — the agent hands off for human acceptance/freigabe (Gate 2 forces this)
+- `blocked` — the agent reports `PLAN CHANGE REQUESTED` / missing prerequisites here
+
+Look for `Deck Board-Eignung` (suitable) or `Deck Board NICHT geeignet` in
+`gateway.log` right after startup. A non-suitable board is logged but does **not**
+block the gateway.
+
 ## Tests
 
 ```bash
@@ -97,8 +117,64 @@ Every outgoing message is categorized before it is written as a Deck comment
 | **Error** (⚠️-prefixed failures, provider/tool errors) | Posted as comment with `🚫 **Fehler**` prefix |
 | **Forward** | Posted as normal comment |
 
-Card actions via metadata (`description`, `target_status`) bypass the filter —
-they are structural operations, not chat messages.
+Card actions via `metadata` bypass the filter — they are structural operations,
+not chat messages (see [Workflow model](#workflow-model-v5) below).
+
+## Workflow model (v5)
+
+The adapter implements the agentic Kanban workflow described in
+[`docs/workflow-concept-v5.md`](docs/workflow-concept-v5.md). Board columns are
+generic lifecycle states (`Backlog` | `Triage` | `Todo` | `Ready` | `Running` |
+`Review` | `Blocked` | `Done`); the *semantic* phase lives in namespaced labels.
+
+### Phases (labels)
+
+| Label | Meaning |
+| --- | --- |
+| `hermes/phase:plan` | Read-only conception — agent writes plan + subtasks, makes no productive changes |
+| `hermes/phase:execute` | Execute the approved plan, check off subtasks with evidence |
+| `hermes/type:documentation` / `:troubleshooting` / `:implementation` / `:research` | Task type |
+| `hermes/risk:low` / `:medium` / `:high` | Risk level |
+| `hermes/approval:required` / `:approved` | Human approval for the `execute` phase |
+
+### Gates (enforced in `workflow.py`)
+
+| Gate | Rule |
+| --- | --- |
+| **Gate 1** (Plan → Execute) | Mandatory only for `hermes/type:implementation` or `hermes/risk:medium|high|critical` (progressive autonomy). The agent may not move to `Running`/set `execute` without `hermes/approval:approved`. `documentation`/`troubleshooting`/`research` with `risk:low` may proceed autonomously. |
+| **Gate 2** (Execute → Done) | The agent may never move a card to `Done`; it moves to `Review` for human acceptance. |
+| **Gate 3** (Destructive) | For `hermes/risk:high`, destructive tool calls (`delete`, `restart`, `reset`, `deactivate`, …) are **technically blocked** by a `pre_tool_call` hook until explicit approval is given. The blocklist is extensible via `extra.destructive_tool_patterns`. |
+
+### Card actions via `metadata`
+
+The agent mutates cards through the `metadata` dictionary of its reply:
+
+```json
+{
+  "target_status": "review",
+  "description": "# Objective\n...\n## Subtasks\n- [x] 1. Analyse\n- [ ] 2. Umsetzung",
+  "assign_labels": ["hermes/approval:required"],
+  "remove_labels": ["hermes/phase:plan"],
+  "assign_user": "marten",
+  "unassign_user": "hermes"
+}
+```
+
+- `target_status` resolves via board config `status_mapping`/`stack_mapping` or a
+  case-insensitive stack-title match.
+- `assign_user` resolves a username/display-name to a Nextcloud UID via the
+  provisioning API (`identity.resolve_user_uid`).
+- Subtasks are Markdown checkboxes in the description (Deck has no checklist API);
+  progress is derived from them, not stored separately.
+
+### Trigger & dedup
+
+- `stack_id` **and** `labels` are part of the dedup fingerprint (`state.py`), so a
+  human column move *or* label change (e.g. `hermes/approval:approved`) re-triggers
+  the agent.
+- After each agent run the dedup baseline is re-set to the current card state
+  (`adapter._rebaseline_card`), so the agent's own label/description changes don't
+  loop — but a later human edit does.
 
 ## Identity propagation
 
