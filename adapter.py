@@ -984,6 +984,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         risk = hermes_labels.get("risk")
         approval = hermes_labels.get("approval")
 
+        # Phase-Auto-Set: Trägt die Karte noch KEIN hermes/phase:* Label, wird
+        # 'hermes/phase:plan' einmalig gesetzt, damit der Zustand im Deck-UI
+        # sichtbar ist (konzeptionell ist "kein Label" = Plan-Phase). Loop-sicher,
+        # weil die Re-Baseline nach dem Lauf die neue Baseline übernimmt.
+        if not hermes_labels.get("phase"):
+            try:
+                applied, _ = await self._apply_label_to_card(card_id, f"{LABEL_PREFIX_PHASE}{PHASE_PLAN}")
+                if applied:
+                    logger.info("Deck: Karte %s: 'hermes/phase:plan' automatisch gesetzt.", card_id)
+            except Exception as exc:
+                logger.debug("Deck: Auto-Set phase:plan fehlgeschlagen: %s", exc)
+
         subtask_progress = parse_subtasks(snapshot.description)
         capabilities_prompt = build_capabilities_prompt(
             phase=phase,

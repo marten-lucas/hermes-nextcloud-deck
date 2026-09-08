@@ -50,10 +50,14 @@ Wichtige Ablaufregeln:
 
 - **Plan fertig:** `deck_card_action` mit `description` (Plan inkl. Subtasks),
   `target_status: "review"` und `assign_labels: ["hermes/approval:required"]`.
+  Die Karte bleibt in `hermes/phase:plan`, bis ein Mensch freigibt.
+- **Execute-Start (nach Freigabe):** `deck_card_action` mit
+  `remove_labels: ["hermes/phase:plan"]` + `assign_labels: ["hermes/phase:execute"]`.
+  So ist der Phasenwechsel auch im Deck-UI sichtbar.
 - **Subtask abgehakt:** `deck_card_action` mit aktualisierter `description`
   (Checkbox auf `[x]`, ggf. `Evidence: ...`-Zeile).
 - **Abnahme übergeben:** `deck_card_action` mit `target_status: "review"`
-  (niemals `done` — Gate 2) und ggf. `assign_user` auf den Menschen.
+  (niemals `done` — Gate 2) + `assign_labels: ["hermes/approval:required"]`.
 - **Plan-Mismatch:** `target_status: "blocked"` + `comment: "🤖 PLAN CHANGE REQUESTED"`.
 - **Struktur + Kommentar in einem Schritt:** Nutze das Feld `comment`, um im
   selben `deck_card_action`-Aufruf eine sichtbare Nachricht zu posten — so brauchst

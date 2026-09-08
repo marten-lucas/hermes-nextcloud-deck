@@ -288,6 +288,7 @@ def build_capabilities_prompt(
             "- Nach erfolgreicher Abarbeitung aller Subtasks und Verifikation:",
             "  * Verschiebe nach 'review' (NICHT nach 'done' — der Mensch nimmt ab!)",
             "  * Dokumentiere das Gesamtergebnis im Result-Bereich der Beschreibung.",
+            "  * Setze 'hermes/approval:required' für die Abnahme.",
         ])
 
     if norm_risk in {"high", "critical"}:
