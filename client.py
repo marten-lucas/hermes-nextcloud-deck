@@ -187,12 +187,20 @@ class NextcloudDeckClient:
         target_stack_id: str | int,
         order: int = 0,
     ) -> Optional[Dict[str, Any]]:
+        # Hinweis: Der reorder-Endpoint gibt ein ARRAY der Karten im Ziel-Stack
+        # zurück (nicht ein einzelnes Karten-Dict). Daher gilt: jede nicht-leere
+        # Antwort = Erfolg.
         data = await self._request(
             "PUT",
             f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/reorder",
             json={"stackId": target_stack_id, "order": int(order)},
         )
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            # Erfolg: mindestens die verschobene Karte sollte enthalten sein.
+            return {"reordered": True, "stack": target_stack_id, "cards": data}
+        return None
 
     async def update_card(
         self,
@@ -205,15 +213,44 @@ class NextcloudDeckClient:
         due_date: Optional[str] = None,
         done: Any = None,
     ) -> Optional[Dict[str, Any]]:
-        payload: Dict[str, Any] = {}
-        if title is not None:
-            payload["title"] = title
+        """Aktualisiert eine Karte.
+
+        Wichtig: Die Deck-API ``PUT boards/{b}/stacks/{s}/cards/{id}`` verlangt
+        ein **vollständiges** Karten-Objekt (``title`` ist Pflicht, sonst HTTP
+        400 "title must be provided"). Daher wird der aktuelle Karten-State
+        geladen und mit den gewünschten Änderungen gemergt, bevor er gesendet
+        wird.
+        """
+        # Aktuellen State laden (für title/type/order, die die API zwingend
+        # erwartet). Schlägt das Laden fehl, wird ohne Merge versucht.
+        current: Dict[str, Any] = {}
+        try:
+            fetched = await self.get_card(board_id, stack_id, card_id)
+            if isinstance(fetched, dict):
+                current = fetched
+        except NextcloudDeckError:
+            current = {}
+
+        payload: Dict[str, Any] = {
+            "title": current.get("title") if title is None else title,
+            "type": current.get("type") or "plain",
+            "order": int(current.get("order") or 0),
+        }
         if description is not None:
             payload["description"] = description
+        elif "description" in current:
+            payload["description"] = current["description"]
         if due_date is not None:
             payload["duedate"] = due_date
+        elif current.get("duedate") is not None:
+            payload["duedate"] = current["duedate"]
         if done is not None:
             payload["done"] = done
+
+        # title muss immer vorhanden sein (Pflichtfeld der API)
+        if not payload.get("title"):
+            return None
+
         data = await self._request(
             "PUT",
             f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}",
