@@ -210,19 +210,20 @@ class NextcloudDeckClient:
         *,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        owner: Optional[str] = None,
         due_date: Optional[str] = None,
         done: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """Aktualisiert eine Karte.
 
         Wichtig: Die Deck-API ``PUT boards/{b}/stacks/{s}/cards/{id}`` verlangt
-        ein **vollständiges** Karten-Objekt (``title`` ist Pflicht, sonst HTTP
-        400 "title must be provided"). Daher wird der aktuelle Karten-State
-        geladen und mit den gewünschten Änderungen gemergt, bevor er gesendet
-        wird.
+        ein **vollständiges** Karten-Objekt. Der ``CardServiceValidator`` macht
+        ``title``, ``type``, ``owner`` und ``order`` zu Pflichtfeldern — fehlt
+        eines davon, antwortet der Server mit HTTP 400 (leerer Body). Daher wird
+        der aktuelle Karten-State geladen und mit den Änderungen gemergt.
         """
-        # Aktuellen State laden (für title/type/order, die die API zwingend
-        # erwartet). Schlägt das Laden fehl, wird ohne Merge versucht.
+        # Aktuellen State laden (für title/type/owner/order, die die API
+        # zwingend erwartet). Schlägt das Laden fehl, wird ohne Merge versucht.
         current: Dict[str, Any] = {}
         try:
             fetched = await self.get_card(board_id, stack_id, card_id)
@@ -231,9 +232,25 @@ class NextcloudDeckClient:
         except NextcloudDeckError:
             current = {}
 
+        # owner aus dem aktuellen State ableiten (owner ist Pflichtfeld).
+        resolved_owner = owner
+        if resolved_owner is None:
+            owner_obj = current.get("owner")
+            if isinstance(owner_obj, dict):
+                resolved_owner = (
+                    owner_obj.get("uid")
+                    or owner_obj.get("primaryKey")
+                    or owner_obj.get("id")
+                )
+            elif owner_obj:
+                resolved_owner = str(owner_obj)
+        if resolved_owner is None:
+            resolved_owner = self.username
+
         payload: Dict[str, Any] = {
             "title": current.get("title") if title is None else title,
             "type": current.get("type") or "plain",
+            "owner": str(resolved_owner),
             "order": int(current.get("order") or 0),
         }
         if description is not None:
