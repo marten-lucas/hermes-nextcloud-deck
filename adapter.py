@@ -104,6 +104,11 @@ except Exception:  # local test fallback
 
 logger = logging.getLogger(__name__)
 
+# Modul-Global: Live-Adapter-Referenz für den Deck-Card-Action-Tool-Handler.
+# Der Handler läuft im Tool-Worker-Thread, muss aber auf die Adapter-Instanz
+# zugreifen, die auf dem Gateway-Loop lebt. Wird im __init__ gesetzt.
+_LIVE_ADAPTER_REF: Optional["NextcloudDeckPlatform"] = None
+
 
 @dataclass
 class DeckRuntimeConfig:
@@ -212,9 +217,16 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
             if board_id:
                 boards[board_id] = dict(item)
 
+    # Deck hat keinen eigenen Home-Channel im Talk-Sinne. Der globale
+    # NEXTCLOUD_HOME_CHANNEL (Talk-Raum) darf NICHT als Deck-Home-Channel
+    # interpretiert werden — sonst erscheint beim Agent die irreführende
+    # "No home channel"-Notice bzw. Cron-Ergebnisse würden in einen Talk-Raum
+    # geleitet. Nur eine explizite Deck-Konfiguration (extra.home_channel oder
+    # NEXTCLOUD_DECK_HOME_CHANNEL) gilt; ein besonderer Wert "log" leitet die
+    # Cron-/Cross-Platform-Zustellung in ein Logfile statt auf eine Karte.
     home_channel = str(
         extra.get("home_channel")
-        or _env("NEXTCLOUD_DECK_HOME_CHANNEL", "NEXTCLOUD_HOME_CHANNEL")
+        or _env("NEXTCLOUD_DECK_HOME_CHANNEL")
     ).strip() or None
 
     raw_aliases = (
@@ -272,6 +284,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, self._resolve_platform())
+        global _LIVE_ADAPTER_REF
+        _LIVE_ADAPTER_REF = self
         self.runtime = _build_runtime_config(config)
         self.client = NextcloudDeckClient(
             self.runtime.base_url,
@@ -290,6 +304,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
+        self._gateway_loop = None
 
     @property
     def is_connected(self) -> bool:
@@ -308,6 +323,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
         self._stop_event.clear()
+        # Gateway-Loop für Cross-Thread-Dispatch des Card-Action-Tools merken.
+        try:
+            self._gateway_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._gateway_loop = None
         await self.client.ensure_session()
         await self.client.get_boards()
         self._connected = True
@@ -317,6 +337,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # ein ungeeignetes Board darf das Gateway nicht blockieren).
         await self.check_board_suitability()
         return True
+
+    async def _call_on_gateway_loop(self, coro_factory):
+        """Führt eine Coroutine auf dem Gateway-Loop aus (Cross-Thread-sicher).
+
+        Das Card-Action-Tool läuft in einem Worker-Thread/-Loop; die
+        aiohttp-Session des Adapters ist aber an den Gateway-Loop gebunden.
+        """
+        loop = getattr(self, "_gateway_loop", None)
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if loop is None or (current is not None and current is loop):
+            return await coro_factory()
+        if loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
+            return await asyncio.wrap_future(fut)
+        return await coro_factory()
 
     async def check_board_suitability(self) -> List[Any]:
         """Prüft alle konfigurierten Boards auf Workflow-Eignung und loggt Reports.
@@ -385,6 +423,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         del reply_to
         card_id = self._card_id_from_target(target)
         metadata = metadata or {}
+
+        # Log-Sink: Ist der Home-Channel auf "log" gesetzt (kein Karten-Target),
+        # landet Cron-/Cross-Platform-Zustellung in einem Logfile statt auf einer
+        # Karte. Kein Deck-Kommentar, keine Fehlermeldung an den Agent.
+        if self.runtime.home_channel == "log" and target == "log":
+            await self._write_home_log(content)
+            return SendResult(success=True)
 
         # Loop-Prävention: interne Gateway-Meldungen nicht als Deck-Kommentar
         # spiegeln. Lifecycle → still verwerfen (Deck hat kein Presence-Konzept),
@@ -473,6 +518,23 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if card_action_taken:
             return SendResult(success=True)
         return SendResult(success=False, error="Empty message and no card action metadata")
+
+    async def _write_home_log(self, content: str) -> None:
+        """Schreibt eine Home-Channel-Meldung in ein dediziertes Logfile.
+
+        Wird genutzt, wenn ``home_channel: "log"`` konfiguriert ist — Cron-
+        Ergebnisse und Cross-Platform-Meldungen werden dann nicht auf eine Karte
+        geschrieben, sondern nur protokolliert.
+        """
+        log_path = Path.home() / ".hermes" / "logs" / "deck-home.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            ts = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{ts}] {content}\n\n")
+            logger.info("Deck: Home-Channel-Meldung in %s protokolliert", log_path)
+        except Exception as exc:
+            logger.warning("Deck: Konnte Home-Log nicht schreiben (%s): %s", log_path, exc)
 
     async def _update_card_description(self, card_id: str, description: str) -> bool:
         """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards)."""
@@ -870,6 +932,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         text = (
             f"Nextcloud Deck Karte: {snapshot.title}\n"
+            f"Karten-ID (card_id): {card_id}\n"
             f"Aktuelle Spalte: {stack_title}\n"
             f"Labels: {', '.join(all_label_titles) if all_label_titles else 'keine'}\n"
             f"Subtasks: {subtask_progress.summary()}\n\n"
@@ -1055,6 +1118,116 @@ def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
     return NextcloudDeckPlatform(config)
 
 
+DECK_CARD_ACTION_SCHEMA = {
+    "name": "deck_card_action",
+    "description": (
+        "Führe eine strukturelle Aktion auf einer Nextcloud-Deck-Karte aus: "
+        "Beschreibung aktualisieren, Karte in eine Zielspalte verschieben, "
+        "Labels zuweisen/entfernen oder einen Benutzer zuweisen/entfernen. "
+        "Nutze dieses Tool statt einen Kommentar zu schreiben, wenn du den "
+        "Workflow-Vertrag erfüllen willst (Plan in die Description schreiben, "
+        "nach 'review' schieben, 'hermes/approval:required' setzen)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "card_id": {
+                "type": "string",
+                "description": "Die Karten-ID (aus dem Kontext: 'Karten-ID (card_id)').",
+            },
+            "target_status": {
+                "type": "string",
+                "description": "Zielspalte (backlog|triage|todo|ready|running|review|blocked|done).",
+            },
+            "description": {
+                "type": "string",
+                "description": "Neuer vollständiger Description-Text (Markdown, inkl. Subtasks).",
+            },
+            "assign_labels": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Labels, die der Karte zugewiesen werden sollen (z. B. ['hermes/approval:required']).",
+            },
+            "remove_labels": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Labels, die entfernt werden sollen (z. B. ['hermes/phase:plan']).",
+            },
+            "assign_user": {
+                "type": "string",
+                "description": "Benutzer (UID oder Username), der der Karte zugewiesen werden soll.",
+            },
+            "unassign_user": {
+                "type": "string",
+                "description": "Benutzer (UID oder Username), der von der Karte entfernt werden soll.",
+            },
+        },
+        "required": ["card_id"],
+    },
+}
+
+
+def _make_deck_card_action_handler() -> Any:
+    """Erzeugt den (async) Tool-Handler für `deck_card_action`.
+
+    Der Handler wird mit ``is_async=True`` registriert; er reicht die
+    eigentliche Aktion über die Live-Adapter-Referenz an den Gateway-Loop
+    durch (aiohttp-Session-Bindung) und awaitet das Ergebnis.
+    """
+
+    async def _handle_deck_card_action(args: Dict[str, Any] | None = None, **kwargs: Any) -> Dict[str, Any]:
+        args = args or {}
+        adapter = _LIVE_ADAPTER_REF
+        if adapter is None:
+            return {"success": False, "error": "Deck-Adapter nicht verbunden"}
+
+        card_id = str(args.get("card_id") or "").strip()
+        if not card_id:
+            return {"success": False, "error": "card_id fehlt"}
+
+        target = args.get("target_status")
+        description = args.get("description")
+        assign_labels = args.get("assign_labels")
+        remove_labels = args.get("remove_labels")
+        assign_user = args.get("assign_user")
+        unassign_user = args.get("unassign_user")
+
+        metadata: Dict[str, Any] = {}
+        if target:
+            metadata["target_status"] = str(target)
+        if description is not None:
+            metadata["description"] = str(description)
+        if assign_labels:
+            metadata["assign_labels"] = assign_labels if isinstance(assign_labels, list) else [assign_labels]
+        if remove_labels:
+            metadata["remove_labels"] = remove_labels if isinstance(remove_labels, list) else [remove_labels]
+        if assign_user:
+            metadata["assign_user"] = assign_user
+        if unassign_user:
+            metadata["unassign_user"] = unassign_user
+
+        if not metadata:
+            return {"success": False, "error": "Keine Aktion angegeben"}
+
+        async def _do():
+            return await adapter.send(
+                chat_id=f"deck:board:unknown:card:{card_id}",
+                content="",
+                metadata=metadata,
+            )
+
+        try:
+            result = await adapter._call_on_gateway_loop(_do)
+        except Exception as exc:
+            return {"success": False, "error": f"Deck-Aktion fehlgeschlagen: {exc}"}
+
+        if result.success:
+            return {"success": True}
+        return {"success": False, "error": result.error or "Deck-Aktion fehlgeschlagen"}
+
+    return _handle_deck_card_action
+
+
 def _destructive_tool_hook(tool_name: str = "", args: Any = None, **kwargs: Any) -> Any:
     """pre_tool_call-Hook: Gate 3 — destruktive Tools bei risk:high blocken.
 
@@ -1100,6 +1273,22 @@ def register(ctx: Any) -> None:
             logger.info("Deck: 'pre_tool_call'-Hook für Gate 3 registriert.")
         except Exception as exc:
             logger.warning("Deck: Konnte Gate-3-Hook nicht registrieren: %s", exc)
+
+    # Card-Action-Tool: der einzige Weg, wie der Agent strukturelle
+    # Karten-Aktionen (target_status/description/labels/assignee) auslösen kann,
+    # da das Gateway send_message-Tool kein metadata durchreicht.
+    if hasattr(ctx, "register_tool"):
+        try:
+            ctx.register_tool(
+                name="deck_card_action",
+                toolset="nextcloud-deck-platform",
+                schema=DECK_CARD_ACTION_SCHEMA,
+                handler=_make_deck_card_action_handler(),
+                is_async=True,
+            )
+            logger.info("Deck: Tool 'deck_card_action' registriert.")
+        except Exception as exc:
+            logger.warning("Deck: Konnte 'deck_card_action' nicht registrieren: %s", exc)
 
     skills_dir = Path(__file__).parent / "skills"
     if skills_dir.is_dir():

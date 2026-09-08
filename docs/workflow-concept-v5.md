@@ -240,10 +240,11 @@ eigenständig von `plan` nach `execute` wechseln.
 
 **Fakten zum Repo-Stand (Ausgangslage):**
 - **Gate-Sperre vorhanden** — Agent kann `metadata["target_status"]` nicht beliebig setzen: `done`/`backlog` sind immer gesperrt (Gate 2), `running` in der Plan-Phase je nach Typ/Risiko (Gate 1, progressive Autonomy).
-- Agent **kennt seine Spalte & Labels** (Prompt enthält Titel, Beschreibung, Spalte, Labels, Subtask-Fortschritt, letzten Kommentar).
+- Agent **kennt seine Spalte & Labels** (Prompt enthält Titel, Beschreibung, Spalte, Labels, Subtask-Fortschritt, letzten Kommentar, **und die Karten-ID**).
 - Client unterstützt **Checklist-/Label-/Assignee-API** (`assignLabel`/`removeLabel`/`assignUser`/`unassignUser` — Endpunkte in der Deck-REST-API). Checklist-Endpunkte existieren nicht → Subtasks als Markdown-Checkboxen in der Description.
+- **Card-Aktionen laufen über das registrierte Tool `deck_card_action`** — das Gateway-`send_message`-Tool reicht kein `metadata` durch, daher kann der Agent Karten nur über dieses dedizierte Tool strukturell verändern (Description/Status/Labels/Assignee).
 - Dedup-Fingerprint enthält `stack_id` **und `labels`** → Spaltenwechsel *und* Label-Wechsel = neues Event (mit Re-Baseline nach jedem Lauf als Loop-Schutz).
-- SKILL.md dokumentiert `target_status`/Description-Änderung und die Label-/Assignee-Metadaten.
+- SKILL.md dokumentiert `deck_card_action`, die Gates und die Label-/Assignee-Metadaten.
 
 ---
 

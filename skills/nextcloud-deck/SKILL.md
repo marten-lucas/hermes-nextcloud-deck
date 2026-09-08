@@ -27,20 +27,34 @@ Use this skill when a task explicitly concerns the Hermes Nextcloud Deck integra
 - Ein menschenseitiger **Spaltenwechsel ODER Label-Wechsel** (z. B. `hermes/approval:approved`) ist ein echtes Event und triggert den Agenten erneut — die Labels sind Teil des Dedup-Fingerprints.
 - Der Adapter setzt die Dedup-Baseline **nach** jedem Agent-Lauf auf den aktuellen Karten-Zustand zurück. Vom Agenten selbst gesetzte Labels/Description-Änderungen lösen damit keinen Loop aus; ein späterer Eingriff des Menschen aber schon.
 
-## Card-Metadaten für Aktionen
+## Card-Aktionen (Tool `deck_card_action`)
 
-Hermes kann Aktionen auf der Karte über das `metadata`-Dictionary der Antwort ausführen:
+Um den Workflow-Vertrag zu erfüllen, nutze **immer** das Tool `deck_card_action`
+— **nicht** einen reinen Text-Kommentar. Der Kommentar (`send_message`) kann die
+Karte nicht strukturell verändern; nur `deck_card_action` setzt Description,
+Status, Labels und Assignee. Die `card_id` steht im Kontext (`Karten-ID (card_id)`).
 
 ```json
 {
+  "card_id": "106",
   "target_status": "review",
   "description": "# Objective\n...\n## Subtasks\n- [x] 1. Analyse\n- [ ] 2. Umsetzung",
   "assign_labels": ["hermes/approval:required"],
   "remove_labels": ["hermes/phase:plan"],
-  "assign_user": "marten",
-  "unassign_user": "hermes"
+  "assign_user": "marten"
 }
 ```
+
+Wichtige Ablaufregeln:
+
+- **Plan fertig:** `deck_card_action` mit `description` (Plan inkl. Subtasks),
+  `target_status: "review"` und `assign_labels: ["hermes/approval:required"]`.
+- **Subtask abgehakt:** `deck_card_action` mit aktualisierter `description`
+  (Checkbox auf `[x]`, ggf. `Evidence: ...`-Zeile).
+- **Abnahme übergeben:** `deck_card_action` mit `target_status: "review"`
+  (niemals `done` — Gate 2) und ggf. `assign_user` auf den Menschen.
+- **Plan-Mismatch:** `target_status: "blocked"` + einen `send_message`-Kommentar
+  `🤖 PLAN CHANGE REQUESTED`.
 
 ## Configuration
 

@@ -24,7 +24,61 @@ from workflow import (
     analyze_board_suitability,
     resolve_stack_id_for_status,
 )
-from adapter import NextcloudDeckPlatform
+from adapter import (
+    NextcloudDeckPlatform,
+    DECK_CARD_ACTION_SCHEMA,
+    _make_deck_card_action_handler,
+)
+
+
+class TestDeckCardActionTool(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import adapter as adapter_mod
+        self._prev_ref = adapter_mod._LIVE_ADAPTER_REF
+        self.config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes",
+                "boards": [{"board_id": "7"}],
+            }
+        )
+        self.adapter = NextcloudDeckPlatform(self.config)
+        self.adapter.client = MagicMock()
+        adapter_mod._LIVE_ADAPTER_REF = self.adapter
+
+    def tearDown(self):
+        import adapter as adapter_mod
+        adapter_mod._LIVE_ADAPTER_REF = self._prev_ref
+
+    async def test_handler_requires_card_id(self):
+        handler = _make_deck_card_action_handler()
+        result = await handler({"target_status": "review"})
+        self.assertFalse(result["success"])
+        self.assertIn("card_id", result["error"])
+
+    async def test_handler_builds_metadata_and_calls_send(self):
+        self.adapter.send = AsyncMock(return_value=SimpleNamespace(success=True))
+        handler = _make_deck_card_action_handler()
+        result = await handler({
+            "card_id": "42",
+            "target_status": "review",
+            "description": "# Plan",
+            "assign_labels": ["hermes/approval:required"],
+        })
+        self.assertTrue(result["success"])
+        self.adapter.send.assert_called_once()
+        metadata = self.adapter.send.call_args[1]["metadata"]
+        self.assertEqual(metadata["target_status"], "review")
+        self.assertEqual(metadata["description"], "# Plan")
+        self.assertEqual(metadata["assign_labels"], ["hermes/approval:required"])
+
+    def test_schema_declares_expected_fields(self):
+        props = DECK_CARD_ACTION_SCHEMA["parameters"]["properties"]
+        for field in ("card_id", "target_status", "description", "assign_labels", "remove_labels", "assign_user", "unassign_user"):
+            self.assertIn(field, props)
+        self.assertEqual(DECK_CARD_ACTION_SCHEMA["parameters"]["required"], ["card_id"])
 
 
 class TestWorkflowLogic(unittest.TestCase):

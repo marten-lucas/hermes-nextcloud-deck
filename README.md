@@ -62,12 +62,19 @@ platforms:
       username: "hermes"
       app_password: "APP_PASSWORD"
       hermes_user_id: "hermes"
+      home_channel: "log"   # optional: Cron-/Cross-Platform-Zustellung ins Logfile statt auf Karte
       poll_interval_seconds: 30
       boards:
         - board_id: "7"
 ```
 
 Do not omit `boards`. An empty board list means the adapter connects but intentionally ingests no cards.
+
+`home_channel` is optional. When omitted, Deck has **no** home channel — the
+global `NEXTCLOUD_HOME_CHANNEL` (a Talk room) is **not** reused, so no misleading
+"no home channel" notice appears. Set it to a Deck card target
+(`deck:board:<id>:card:<id>`) to receive cron/cross-platform messages on a card,
+or to `"log"` to route them to `~/.hermes/logs/deck-home.log` instead.
 
 ## Diagnostics
 
@@ -145,18 +152,19 @@ generic lifecycle states (`Backlog` | `Triage` | `Todo` | `Ready` | `Running` |
 | **Gate 2** (Execute → Done) | The agent may never move a card to `Done`; it moves to `Review` for human acceptance. |
 | **Gate 3** (Destructive) | For `hermes/risk:high`, destructive tool calls (`delete`, `restart`, `reset`, `deactivate`, …) are **technically blocked** by a `pre_tool_call` hook until explicit approval is given. The blocklist is extensible via `extra.destructive_tool_patterns`. |
 
-### Card actions via `metadata`
+### Card actions via `deck_card_action` tool
 
-The agent mutates cards through the `metadata` dictionary of its reply:
+The agent mutates cards through the **`deck_card_action`** tool (not `send_message`,
+which cannot pass structured metadata). Parameters: `card_id`, `target_status`,
+`description`, `assign_labels`, `remove_labels`, `assign_user`, `unassign_user`:
 
 ```json
 {
+  "card_id": "106",
   "target_status": "review",
   "description": "# Objective\n...\n## Subtasks\n- [x] 1. Analyse\n- [ ] 2. Umsetzung",
   "assign_labels": ["hermes/approval:required"],
-  "remove_labels": ["hermes/phase:plan"],
-  "assign_user": "marten",
-  "unassign_user": "hermes"
+  "remove_labels": ["hermes/phase:plan"]
 }
 ```
 
