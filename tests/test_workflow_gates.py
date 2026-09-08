@@ -82,6 +82,54 @@ class TestDeckCardActionTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DECK_CARD_ACTION_SCHEMA["parameters"]["required"], ["card_id"])
 
 
+class TestSetupTestCard(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.config = SimpleNamespace(
+            extra={
+                "base_url": "https://cloud.example.org",
+                "username": "hermes",
+                "app_password": "secret",
+                "hermes_user_id": "hermes",
+                "boards": [{"board_id": "7"}],
+            }
+        )
+        self.adapter = NextcloudDeckPlatform(self.config)
+        self.adapter.client = MagicMock()
+
+    async def test_setup_test_card_creates_and_assigns(self):
+        self.adapter.client.get_stacks = AsyncMock(return_value=[
+            {"id": "39", "title": "Todo"},
+        ])
+        self.adapter.client.create_card = AsyncMock(return_value={"id": "123"})
+        self.adapter._apply_label_to_card = AsyncMock(return_value=(True, None))
+        self.adapter._assign_user_to_card = AsyncMock(return_value=True)
+
+        card_id = await self.adapter.setup_test_card(
+            board_id="7",
+            title="Test Karte",
+            description="# Objective",
+            stack_title="Todo",
+            label_titles=["hermes/risk:low"],
+            assignee="ki_assistent",
+        )
+        self.assertEqual(card_id, "123")
+        self.adapter.client.create_card.assert_called_once()
+        self.adapter._apply_label_to_card.assert_called_once_with("123", "hermes/risk:low")
+        self.adapter._assign_user_to_card.assert_called_once_with("123", "ki_assistent")
+
+    async def test_setup_test_card_stack_not_found(self):
+        self.adapter.client.get_stacks = AsyncMock(return_value=[
+            {"id": "39", "title": "Todo"},
+        ])
+        card_id = await self.adapter.setup_test_card(
+            board_id="7",
+            title="Test",
+            stack_title="GibtEsNicht",
+        )
+        self.assertIsNone(card_id)
+        self.adapter.client.create_card.assert_not_called()
+
+
 class TestWorkflowLogic(unittest.TestCase):
     def test_parse_subtasks(self):
         desc = (

@@ -389,6 +389,67 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 logger.warning("Deck Board NICHT geeignet (fehlende Pflicht-Spalten):\n%s", result.format_report())
         return results
 
+    async def setup_test_card(
+        self,
+        board_id: str,
+        title: str,
+        description: str = "",
+        stack_title: str = "Todo",
+        label_titles: Optional[List[str]] = None,
+        assignee: Optional[str] = None,
+    ) -> Optional[str]:
+        """Erstellt eine Test-Karte in einem Schritt (Karte + Labels + Assignee).
+
+        Nützlich für automatisierte E2E-Tests: legt die Karte in der Spalte
+        ``stack_title`` an, weist die Labels per Titel zu (erstellt fehlende
+        Labels automatisch) und setzt optional den Assignee.
+
+        Rückgabe: die neue Karten-ID, oder None bei Fehler.
+        """
+        label_titles = label_titles or []
+        try:
+            stacks = await self.client.get_stacks(board_id)
+        except NextcloudDeckError as exc:
+            logger.warning("Deck: setup_test_card: Spalten nicht ladbar: %s", exc)
+            return None
+
+        stack_id = None
+        for s in stacks if isinstance(stacks, list) else []:
+            if str(s.get("title") or "").strip().casefold() == stack_title.strip().casefold():
+                stack_id = str(s.get("id") or "").strip()
+                break
+        if not stack_id:
+            logger.warning("Deck: setup_test_card: Spalte '%s' nicht gefunden", stack_title)
+            return None
+
+        try:
+            card = await self.client.create_card(
+                board_id, stack_id, title=title, description=description
+            )
+        except NextcloudDeckError as exc:
+            logger.warning("Deck: setup_test_card: Karte konnte nicht erstellt werden: %s", exc)
+            return None
+        if not card or not card.get("id"):
+            return None
+        card_id = str(card["id"])
+
+        # Labels per Titel zuweisen (ggf. anlegen)
+        for label_title in label_titles:
+            try:
+                await self._apply_label_to_card(card_id, str(label_title))
+            except Exception as exc:
+                logger.warning("Deck: setup_test_card: Label '%s' nicht gesetzt: %s", label_title, exc)
+
+        # Assignee setzen
+        if assignee:
+            try:
+                await self._assign_user_to_card(card_id, str(assignee))
+            except Exception as exc:
+                logger.warning("Deck: setup_test_card: Assignee '%s' nicht gesetzt: %s", assignee, exc)
+
+        logger.info("Deck: setup_test_card: Karte %s ('%s') erstellt in '%s'", card_id, title, stack_title)
+        return card_id
+
     async def disconnect(self) -> None:
         self._stop_event.set()
         self._connected = False
