@@ -55,8 +55,8 @@ class TestDeckCardActionTool(unittest.IsolatedAsyncioTestCase):
     async def test_handler_requires_card_id(self):
         handler = _make_deck_card_action_handler()
         result = await handler({"target_status": "review"})
-        self.assertFalse(result["success"])
-        self.assertIn("card_id", result["error"])
+        self.assertIsInstance(result, str)
+        self.assertIn("card_id", result)
 
     async def test_handler_builds_metadata_and_calls_send(self):
         self.adapter.send = AsyncMock(return_value=SimpleNamespace(success=True))
@@ -67,7 +67,8 @@ class TestDeckCardActionTool(unittest.IsolatedAsyncioTestCase):
             "description": "# Plan",
             "assign_labels": ["hermes/approval:required"],
         })
-        self.assertTrue(result["success"])
+        self.assertIsInstance(result, str)
+        self.assertIn('"success": true', result)
         self.adapter.send.assert_called_once()
         metadata = self.adapter.send.call_args[1]["metadata"]
         self.assertEqual(metadata["target_status"], "review")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -1175,15 +1176,15 @@ def _make_deck_card_action_handler() -> Any:
     durch (aiohttp-Session-Bindung) und awaitet das Ergebnis.
     """
 
-    async def _handle_deck_card_action(args: Dict[str, Any] | None = None, **kwargs: Any) -> Dict[str, Any]:
+    async def _handle_deck_card_action(args: Dict[str, Any] | None = None, **kwargs: Any) -> str:
         args = args or {}
         adapter = _LIVE_ADAPTER_REF
         if adapter is None:
-            return {"success": False, "error": "Deck-Adapter nicht verbunden"}
+            return json.dumps({"success": False, "error": "Deck-Adapter nicht verbunden"}, ensure_ascii=False)
 
         card_id = str(args.get("card_id") or "").strip()
         if not card_id:
-            return {"success": False, "error": "card_id fehlt"}
+            return json.dumps({"success": False, "error": "card_id fehlt"}, ensure_ascii=False)
 
         target = args.get("target_status")
         description = args.get("description")
@@ -1207,7 +1208,7 @@ def _make_deck_card_action_handler() -> Any:
             metadata["unassign_user"] = unassign_user
 
         if not metadata:
-            return {"success": False, "error": "Keine Aktion angegeben"}
+            return json.dumps({"success": False, "error": "Keine Aktion angegeben"}, ensure_ascii=False)
 
         async def _do():
             return await adapter.send(
@@ -1219,11 +1220,11 @@ def _make_deck_card_action_handler() -> Any:
         try:
             result = await adapter._call_on_gateway_loop(_do)
         except Exception as exc:
-            return {"success": False, "error": f"Deck-Aktion fehlgeschlagen: {exc}"}
+            return json.dumps({"success": False, "error": f"Deck-Aktion fehlgeschlagen: {exc}"}, ensure_ascii=False)
 
         if result.success:
-            return {"success": True}
-        return {"success": False, "error": result.error or "Deck-Aktion fehlgeschlagen"}
+            return json.dumps({"success": True}, ensure_ascii=False)
+        return json.dumps({"success": False, "error": result.error or "Deck-Aktion fehlgeschlagen"}, ensure_ascii=False)
 
     return _handle_deck_card_action
 
