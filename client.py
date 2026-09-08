@@ -148,6 +148,37 @@ class NextcloudDeckClient:
         )
         return data if isinstance(data, dict) else None
 
+    async def create_card(
+        self,
+        board_id: str | int,
+        stack_id: str | int,
+        *,
+        title: str,
+        description: str = "",
+        type: str = "plain",
+        order: int = 0,
+        due_date: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Erstellt eine neue Karte im angegebenen Stack.
+
+        Deck-REST v1.0: ``POST boards/{b}/stacks/{s}/cards`` mit ``title``,
+        ``description``, ``type`` (default "plain"), ``order``, ``duedate``.
+        """
+        payload: Dict[str, Any] = {
+            "title": str(title)[:255],
+            "description": str(description),
+            "type": str(type),
+            "order": int(order),
+        }
+        if due_date is not None:
+            payload["duedate"] = due_date
+        data = await self._request(
+            "POST",
+            f"boards/{board_id}/stacks/{stack_id}/cards",
+            json=payload,
+        )
+        return data if isinstance(data, dict) else None
+
     async def move_card(
         self,
         board_id: str | int,
