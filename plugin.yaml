@@ -9,6 +9,8 @@ author: Local Development
 entrypoint: adapter.py
 provides_hooks:
   - pre_tool_call
+provides_tools:
+  - deck_card_action
 requires_env:
   - name: NEXTCLOUD_DECK_BASE_URL
     description: "Base URL of the Nextcloud instance"
