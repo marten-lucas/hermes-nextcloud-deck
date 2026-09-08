@@ -74,10 +74,28 @@ class TestDeckCardActionTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["target_status"], "review")
         self.assertEqual(metadata["description"], "# Plan")
         self.assertEqual(metadata["assign_labels"], ["hermes/approval:required"])
+        # Kein comment übergeben -> content ist leer
+        self.assertEqual(self.adapter.send.call_args[1]["content"], "")
+
+    async def test_handler_passes_comment_as_content(self):
+        self.adapter.send = AsyncMock(return_value=SimpleNamespace(success=True))
+        handler = _make_deck_card_action_handler()
+        result = await handler({
+            "card_id": "42",
+            "target_status": "review",
+            "comment": "Plan fertig, bitte abnehmen",
+        })
+        self.assertIn('"success": true', result)
+        self.adapter.send.assert_called_once()
+        self.assertEqual(
+            self.adapter.send.call_args[1]["content"],
+            "Plan fertig, bitte abnehmen",
+        )
+        self.assertEqual(self.adapter.send.call_args[1]["metadata"]["target_status"], "review")
 
     def test_schema_declares_expected_fields(self):
         props = DECK_CARD_ACTION_SCHEMA["parameters"]["properties"]
-        for field in ("card_id", "target_status", "description", "assign_labels", "remove_labels", "assign_user", "unassign_user"):
+        for field in ("card_id", "target_status", "description", "assign_labels", "remove_labels", "assign_user", "unassign_user", "comment"):
             self.assertIn(field, props)
         self.assertEqual(DECK_CARD_ACTION_SCHEMA["parameters"]["required"], ["card_id"])
 

@@ -41,7 +41,8 @@ Status, Labels und Assignee. Die `card_id` steht im Kontext (`Karten-ID (card_id
   "description": "# Objective\n...\n## Subtasks\n- [x] 1. Analyse\n- [ ] 2. Umsetzung",
   "assign_labels": ["hermes/approval:required"],
   "remove_labels": ["hermes/phase:plan"],
-  "assign_user": "marten"
+  "assign_user": "marten",
+  "comment": "Optionaler Kommentar, der im selben Schritt gepostet wird."
 }
 ```
 
@@ -53,8 +54,10 @@ Wichtige Ablaufregeln:
   (Checkbox auf `[x]`, ggf. `Evidence: ...`-Zeile).
 - **Abnahme übergeben:** `deck_card_action` mit `target_status: "review"`
   (niemals `done` — Gate 2) und ggf. `assign_user` auf den Menschen.
-- **Plan-Mismatch:** `target_status: "blocked"` + einen `send_message`-Kommentar
-  `🤖 PLAN CHANGE REQUESTED`.
+- **Plan-Mismatch:** `target_status: "blocked"` + `comment: "🤖 PLAN CHANGE REQUESTED"`.
+- **Struktur + Kommentar in einem Schritt:** Nutze das Feld `comment`, um im
+  selben `deck_card_action`-Aufruf eine sichtbare Nachricht zu posten — so brauchst
+  du keinen zweiten, separaten Text-Kommentar.
 
 ## Configuration
 

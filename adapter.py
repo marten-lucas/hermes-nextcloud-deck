@@ -24,6 +24,7 @@ try:
         check_agent_status_gate,
         compile_destructive_patterns,
         current_deck_context,
+        current_deck_action_count,
         check_destructive_gate,
         DeckWorkflowContext,
         DestructiveToolBlocked,
@@ -48,6 +49,7 @@ except ImportError:  # direct test/import
         check_agent_status_gate,
         compile_destructive_patterns,
         current_deck_context,
+        current_deck_action_count,
         check_destructive_gate,
         DeckWorkflowContext,
         DestructiveToolBlocked,
@@ -1038,6 +1040,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             approval=approval,
         )
         token = current_deck_context.set(workflow_ctx)
+        action_token = current_deck_action_count.set(0)
         try:
             if principal is not None:
                 with self.identity.principal_context(principal):
@@ -1048,6 +1051,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 await result
         finally:
             current_deck_context.reset(token)
+            action_count = current_deck_action_count.get()
+            current_deck_action_count.reset(action_token)
+
+        # Diagnose: Hat der Agent den Lauf ohne deck_card_action beendet, obwohl
+        # die Phase strukturelle Änderungen erwarten würde? Unsichtbares
+        # "nur Kommentar"-Muster frühzeitig sichtbar machen.
+        if action_count == 0:
+            logger.warning(
+                "Deck: Lauf für Karte %s (Phase '%s') endete ohne deck_card_action-Aufruf — "
+                "der Agent hat vermutlich nur einen Text-Kommentar geschrieben statt die Karte "
+                "strukturell zu verändern.",
+                card_id, phase,
+            )
 
         # Nach erfolgreicher Verarbeitung die Dedup-Baseline auf den *aktuellen*
         # Karten-Zustand setzen. Der Agent kann während handle_message selbst
@@ -1223,6 +1239,10 @@ DECK_CARD_ACTION_SCHEMA = {
                 "type": "string",
                 "description": "Benutzer (UID oder Username), der von der Karte entfernt werden soll.",
             },
+            "comment": {
+                "type": "string",
+                "description": "Optionaler Kommentartext, der zusammen mit der Aktion auf der Karte gepostet wird.",
+            },
         },
         "required": ["card_id"],
     },
@@ -1253,6 +1273,7 @@ def _make_deck_card_action_handler() -> Any:
         remove_labels = args.get("remove_labels")
         assign_user = args.get("assign_user")
         unassign_user = args.get("unassign_user")
+        comment = args.get("comment")
 
         metadata: Dict[str, Any] = {}
         if target:
@@ -1268,13 +1289,14 @@ def _make_deck_card_action_handler() -> Any:
         if unassign_user:
             metadata["unassign_user"] = unassign_user
 
-        if not metadata:
+        content = str(comment) if comment else ""
+        if not metadata and not content:
             return json.dumps({"success": False, "error": "Keine Aktion angegeben"}, ensure_ascii=False)
 
         async def _do():
             return await adapter.send(
                 chat_id=f"deck:board:unknown:card:{card_id}",
-                content="",
+                content=content,
                 metadata=metadata,
             )
 
@@ -1291,12 +1313,21 @@ def _make_deck_card_action_handler() -> Any:
 
 
 def _destructive_tool_hook(tool_name: str = "", args: Any = None, **kwargs: Any) -> Any:
-    """pre_tool_call-Hook: Gate 3 — destruktive Tools bei risk:high blocken.
+    """pre_tool_call-Hook: Gate 3 (Block) + deck_card_action-Diagnose-Zähler.
 
     Liest den aktiven Deck-Karten-Kontext (ContextVar) und blockt destruktive
     Tool-Aufrufe, wenn die Karte risk:high trägt und keine Freigabe vorliegt.
-    Läuft ohne aktiven Deck-Kontext als No-Op (kein globaler Tool-Block).
+    Zählt außerdem deck_card_action-Aufrufe im aktuellen Turn (ContextVar),
+    damit nach dem Lauf sichtbar ist, ob der Agent strukturell aktiv war.
     """
+    # deplumen Zähler unabhängig vom Kontext (deck_card_action kann auch ohne
+    # Karten-Kontext aufgerufen werden, z. B. via Tool ohne gesetzten Context).
+    if str(tool_name or "").strip() == "deck_card_action":
+        try:
+            current_deck_action_count.set(current_deck_action_count.get() + 1)
+        except Exception:
+            pass
+
     workflow_ctx = current_deck_context.get()
     if workflow_ctx is None:
         return args if args is not None else kwargs.get("request") or kwargs.get("payload") or kwargs

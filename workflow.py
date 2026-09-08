@@ -146,6 +146,11 @@ current_deck_context: contextvars.ContextVar[Optional[DeckWorkflowContext]] = co
     "deck_workflow_context", default=None
 )
 
+# ContextVar: zählt deck_card_action-Aufrufe im aktuellen Turn (Diagnose).
+current_deck_action_count: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "deck_card_action_count", default=0
+)
+
 
 @dataclass(frozen=True)
 class Subtask:
@@ -247,6 +252,11 @@ def build_capabilities_prompt(
         f"- Task-Typ: {norm_type}",
         f"- Risiko: {norm_risk}",
         f"- Approval-Status: {approval or 'none'}",
+        "",
+        "🔧 **WICHTIG:** Beschreibung, Spalte, Labels und Assignee änderst du NUR",
+        "über das Tool `deck_card_action`. Ein reiner Text-Kommentar ändert NICHTS an",
+        "der Karte — sie bleibt in ihrer Spalte liegen und dein Plan geht verloren.",
+        "Nutze das Tool in jedem Lauf, der die Karte strukturell weiterbewegt.",
         "",
     ]
 
