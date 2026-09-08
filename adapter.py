@@ -224,12 +224,16 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     # NEXTCLOUD_HOME_CHANNEL (Talk-Raum) darf NICHT als Deck-Home-Channel
     # interpretiert werden — sonst erscheint beim Agent die irreführende
     # "No home channel"-Notice bzw. Cron-Ergebnisse würden in einen Talk-Raum
-    # geleitet. Nur eine explizite Deck-Konfiguration (extra.home_channel oder
-    # NEXTCLOUD_DECK_HOME_CHANNEL) gilt; ein besonderer Wert "log" leitet die
-    # Cron-/Cross-Platform-Zustellung in ein Logfile statt auf eine Karte.
+    # geleitet.
+    #
+    # WICHTIG: Das Gateway prüft die Home-Channel-Notice über das Standard-
+    # Schema ``<PLATFORM>_HOME_CHANNEL`` = ``DECK_HOME_CHANNEL`` (nicht
+    # ``NEXTCLOUD_DECK_HOME_CHANNEL``). Beide werden gelesen. Der besondere
+    # Wert "log" leitet Cron-/Cross-Platform-Zustellung in ein Logfile statt
+    # auf eine Karte.
     home_channel = str(
         extra.get("home_channel")
-        or _env("NEXTCLOUD_DECK_HOME_CHANNEL")
+        or _env("NEXTCLOUD_DECK_HOME_CHANNEL", "DECK_HOME_CHANNEL")
     ).strip() or None
 
     raw_aliases = (
