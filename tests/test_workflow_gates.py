@@ -186,6 +186,43 @@ class TestWorkflowLogic(unittest.TestCase):
         self.assertEqual(extracted.get("risk"), "high")
         self.assertEqual(extracted.get("approval"), "required")
 
+    def test_extract_hermes_labels_friendly(self):
+        """Friendly-Titel werden auf kanonische Keys gemappt."""
+        card = {
+            "labels": [
+                {"title": "🔴 Risiko: Hoch"},
+                {"title": "⏳ Freigabe nötig"},
+                {"title": "🟢 Umsetzung"},
+                {"title": "🟡 Planung"},  # letzte Phase gewinnt
+            ]
+        }
+        extracted = extract_hermes_labels(card)
+        self.assertEqual(extracted.get("phase"), "plan")
+        self.assertEqual(extracted.get("risk"), "high")
+        self.assertEqual(extracted.get("approval"), "required")
+
+    def test_canonical_label_key_variants(self):
+        """Alle Schreibweisen lösen auf denselben kanonischen Key auf."""
+        from workflow import canonical_label_key, friendly_label_title
+        for variant in [
+            "hermes/approval:required",
+            "approval:required",
+            "⏳ Freigabe nötig",
+            "freigabe nötig",
+        ]:
+            self.assertEqual(canonical_label_key(variant), "approval:required", variant)
+        self.assertEqual(canonical_label_key("🟡 Planung"), "phase:plan")
+        self.assertEqual(canonical_label_key("Unbekanntes Label"), None)
+        self.assertEqual(friendly_label_title("phase:plan"), "🟡 Planung")
+        self.assertEqual(friendly_label_title("unbekannt"), "unbekannt")
+
+    def test_label_gate_accepts_friendly_and_canonical(self):
+        """Label-Gate blockt Selbst-Freigabe in beiden Schreibweisen."""
+        for variant in ["hermes/approval:approved", "approval:approved", "✅ Freigabe erteilt"]:
+            allowed, reason = check_agent_label_gate(variant, "plan")
+            self.assertFalse(allowed, variant)
+            self.assertIn("Gate 1", reason)
+
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))
         self.assertTrue(is_backlog_stack({"title": "Ideen"}))

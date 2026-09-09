@@ -20,8 +20,11 @@ try:
         PHASE_EXECUTE,
         PHASE_PLAN,
         build_capabilities_prompt,
+        canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
+        friendly_label_title,
+        FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
         current_deck_context,
@@ -46,8 +49,11 @@ except ImportError:  # direct test/import
         PHASE_EXECUTE,
         PHASE_PLAN,
         build_capabilities_prompt,
+        canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
+        friendly_label_title,
+        FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
         current_deck_context,
@@ -751,7 +757,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return False, str(exc)
 
     async def _apply_label_to_card(self, card_id: str, label_title: str) -> tuple[bool, Optional[str]]:
-        """Weist der Karte ein Label anhand des Titels zu (erstellt das Label bei Bedarf auf dem Board)."""
+        """Weist der Karte ein Label zu (erstellt das Label bei Bedarf auf dem Board).
+
+        Akzeptiert Friendly-Titel ("⏳ Freigabe nötig") und kanonische Keys
+        ("approval:required") sowie die alte technische Form ("hermes/approval:required").
+        Im Board wird das Label immer im Friendly-Format mit Mapping-Farbe angelegt.
+        """
+        # Kanonischen Key auflösen; unbekannte Labels unverändert durchreichen
+        canonical_key = canonical_label_key(label_title)
+        board_title = friendly_label_title(canonical_key) if canonical_key else label_title
+
         location = await self._locate_card(card_id)
         if location is None:
             return False, "Card could not be located"
@@ -759,16 +774,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         current_card = await self.client.get_card(board_id, stack_id, card_id)
         if current_card:
-            # Idempotenz: Ist das Label bereits auf der Karte, ist die Zuweisung
-            # ein No-Op (verhindert Duplikate, wenn der Agent deck_card_action
-            # mit demselben assign_labels mehrfach aufruft).
-            existing_titles = {
-                str(lbl.get("title") or "").strip().lower()
+            # Idempotenz: Ist das Label (in irgendeiner Schreibweise) bereits
+            # auf der Karte, ist die Zuweisung ein No-Op.
+            existing_keys = {
+                canonical_label_key(str(lbl.get("title") or "")) or str(lbl.get("title") or "").strip().lower()
                 for lbl in (current_card.get("labels") or [])
                 if isinstance(lbl, dict)
             }
-            if label_title.strip().lower() in existing_titles:
-                logger.debug("Deck: Label '%s' ist bereits auf Karte %s — übersprungen.", label_title, card_id)
+            target_key = canonical_key or board_title.strip().lower()
+            if target_key in existing_keys:
+                logger.debug("Deck: Label '%s' ist bereits auf Karte %s — übersprungen.", board_title, card_id)
                 return True, None
 
             hermes_labels = extract_hermes_labels(current_card)
@@ -784,20 +799,20 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         board_labels = await self.client.get_board_labels(board_id)
         target_label_id = None
         for lbl in board_labels:
-            if str(lbl.get("title") or "").strip().lower() == label_title.strip().lower():
+            lbl_key = canonical_label_key(str(lbl.get("title") or ""))
+            if lbl_key and lbl_key == canonical_key:
+                target_label_id = lbl.get("id")
+                break
+            if not lbl_key and str(lbl.get("title") or "").strip().lower() == board_title.strip().lower():
                 target_label_id = lbl.get("id")
                 break
 
-        # Wenn Label noch nicht auf dem Board existiert: anlegen
+        # Wenn Label noch nicht auf dem Board existiert: anlegen (Friendly-Titel + Mapping-Farbe)
         if target_label_id is None:
             color = "317CCC"
-            if "approval:approved" in label_title.lower():
-                color = "31CC7C"  # grün
-            elif "risk:high" in label_title.lower() or "approval:required" in label_title.lower():
-                color = "FF7A66"  # rot/koralle
-            elif "phase:plan" in label_title.lower():
-                color = "F1DB50"  # gelb
-            new_lbl = await self.client.create_board_label(board_id, label_title, color=color)
+            if canonical_key and canonical_key in FRIENDLY_LABELS:
+                color = FRIENDLY_LABELS[canonical_key][1]
+            new_lbl = await self.client.create_board_label(board_id, board_title, color=color)
             if new_lbl and new_lbl.get("id"):
                 target_label_id = new_lbl["id"]
 
@@ -815,15 +830,20 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return False, str(exc)
 
     async def _remove_label_from_card(self, card_id: str, label_title: str) -> bool:
-        """Entfernt ein Label anhand des Titels von der Karte."""
+        """Entfernt ein Label von der Karte (Friendly-Titel oder kanonischer Key)."""
         location = await self._locate_card(card_id)
         if location is None:
             return False
         board_id, stack_id = location
 
+        canonical_key = canonical_label_key(label_title)
         board_labels = await self.client.get_board_labels(board_id)
         target_label_id = None
         for lbl in board_labels:
+            lbl_key = canonical_label_key(str(lbl.get("title") or ""))
+            if canonical_key and lbl_key == canonical_key:
+                target_label_id = lbl.get("id")
+                break
             if str(lbl.get("title") or "").strip().lower() == label_title.strip().lower():
                 target_label_id = lbl.get("id")
                 break
@@ -1332,7 +1352,7 @@ DECK_CARD_ACTION_SCHEMA = {
         "Labels zuweisen/entfernen oder einen Benutzer zuweisen/entfernen. "
         "Nutze dieses Tool statt einen Kommentar zu schreiben, wenn du den "
         "Workflow-Vertrag erfüllen willst (Plan in die Description schreiben, "
-        "nach 'review' schieben, 'hermes/approval:required' setzen)."
+        "nach 'review' schieben, '⏳ Freigabe nötig' setzen)."
     ),
     "parameters": {
         "type": "object",
@@ -1352,12 +1372,12 @@ DECK_CARD_ACTION_SCHEMA = {
             "assign_labels": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Labels, die der Karte zugewiesen werden sollen (z. B. ['hermes/approval:required']).",
+                "description": "Labels, die der Karte zugewiesen werden sollen. Friendly-Titel oder kanonische Keys, z. B. ['⏳ Freigabe nötig'] oder ['approval:required'].",
             },
             "remove_labels": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Labels, die entfernt werden sollen (z. B. ['hermes/phase:plan']).",
+                "description": "Labels, die entfernt werden sollen, z. B. ['🟡 Planung'] oder ['phase:plan'].",
             },
             "assign_user": {
                 "type": "string",

@@ -10,11 +10,77 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Standard-Präfixe für Hermes Deck-Labels
+# Standard-Präfixe für Hermes Deck-Labels (technisch, kanonisch)
 LABEL_PREFIX_PHASE = "hermes/phase:"
 LABEL_PREFIX_TYPE = "hermes/type:"
 LABEL_PREFIX_RISK = "hermes/risk:"
 LABEL_PREFIX_APPROVAL = "hermes/approval:"
+
+# ---------------------------------------------------------------------------
+# Friendly Labels: menschenlesbare Anzeige-Namen im Deck-Board.
+# Das Board zeigt die Friendly-Titel; intern (Gates, Agent-Vertrag) arbeiten
+# wir weiter mit den kanonischen Keys. Mapping in beide Richtungen:
+#   FRIENDLY_LABELS: kanonischer Key -> (Anzeige-Titel, Farbe)
+#   LABEL_ALIASES:   beliebiger Titel (friendly/technisch) -> kanonischer Key
+# ---------------------------------------------------------------------------
+FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
+    "phase:plan": ("🟡 Planung", "F1DB50"),
+    "phase:execute": ("🟢 Umsetzung", "31CC7C"),
+    "type:implementation": ("🔧 Umsetzungsaufgabe", "317CCC"),
+    "type:documentation": ("📄 Dokumentation", "317CCC"),
+    "risk:high": ("🔴 Risiko: Hoch", "FF7A66"),
+    "risk:low": ("🟢 Risiko: Gering", "31CC7C"),
+    "approval:required": ("⏳ Freigabe nötig", "FF7A66"),
+    "approval:approved": ("✅ Freigabe erteilt", "31CC7C"),
+}
+
+# Aliase: normalisierter Titel -> kanonischer Key ("phase:plan" etc.)
+LABEL_ALIASES: Dict[str, str] = {}
+for _key, (_title, _color) in FRIENDLY_LABELS.items():
+    LABEL_ALIASES[_title.strip().lower()] = _key
+    LABEL_ALIASES[f"hermes/{_key}"] = _key
+# Zusätzliche Schreibweisen, die der Agent nutzen könnte
+LABEL_ALIASES.update({
+    "planung": "phase:plan",
+    "plan": "phase:plan",
+    "umsetzung": "phase:execute",
+    "execute": "phase:execute",
+    "freigabe nötig": "approval:required",
+    "freigabe noetig": "approval:required",
+    "freigabe erteilt": "approval:approved",
+    "risiko: hoch": "risk:high",
+    "risiko: gering": "risk:low",
+    "dokumentation": "type:documentation",
+    "umsetzungsaufgabe": "type:implementation",
+})
+
+
+def canonical_label_key(label_title: str) -> Optional[str]:
+    """Löst einen Label-Titel (friendly ODER technisch) zum kanonischen Key auf.
+
+    Rückgabe z. B. 'phase:plan' oder None, wenn unbekannt.
+    """
+    norm = str(label_title or "").strip().lower()
+    if not norm:
+        return None
+    if norm in LABEL_ALIASES:
+        return LABEL_ALIASES[norm]
+    # Kanonischer Key direkt angegeben ("phase:plan")
+    if norm in FRIENDLY_LABELS:
+        return norm
+    # Technisch mit hermes/-Prefix ("hermes/phase:plan")
+    if norm.startswith("hermes/") and norm[len("hermes/"):] in FRIENDLY_LABELS:
+        return norm[len("hermes/"):]
+    return None
+
+
+def friendly_label_title(canonical_key: str) -> str:
+    """Gibt den Friendly-Anzeige-Titel für einen kanonischen Key zurück.
+
+    Unbekannte Keys werden unverändert zurückgegeben (Fallback).
+    """
+    entry = FRIENDLY_LABELS.get(str(canonical_key or "").strip().lower())
+    return entry[0] if entry else str(canonical_key)
 
 PHASE_PLAN = "plan"
 PHASE_EXECUTE = "execute"
@@ -196,24 +262,23 @@ def parse_subtasks(description: str) -> SubtaskProgress:
 
 
 def extract_hermes_labels(card: Dict[str, Any]) -> Dict[str, str]:
-    """Liest strukturierte hermes/* Labels aus einer Karte.
+    """Liest strukturierte Workflow-Labels aus einer Karte.
 
-    Gibt ein Dict zurück mit Schlüsseln wie 'phase', 'type', 'risk', 'approval'.
+    Akzeptiert sowohl Friendly-Titel ("🟡 Planung") als auch technische
+    ("hermes/phase:plan"). Gibt ein Dict zurück mit Schlüsseln wie
+    'phase', 'type', 'risk', 'approval' (kanonische Werte).
     """
     labels = card.get("labels") or []
     result: Dict[str, str] = {}
     for label in labels:
         if not isinstance(label, dict):
             continue
-        title = str(label.get("title") or "").strip().lower()
-        if title.startswith(LABEL_PREFIX_PHASE):
-            result["phase"] = title[len(LABEL_PREFIX_PHASE):]
-        elif title.startswith(LABEL_PREFIX_TYPE):
-            result["type"] = title[len(LABEL_PREFIX_TYPE):]
-        elif title.startswith(LABEL_PREFIX_RISK):
-            result["risk"] = title[len(LABEL_PREFIX_RISK):]
-        elif title.startswith(LABEL_PREFIX_APPROVAL):
-            result["approval"] = title[len(LABEL_PREFIX_APPROVAL):]
+        key = canonical_label_key(str(label.get("title") or ""))
+        if not key:
+            continue
+        category, _, value = key.partition(":")
+        if category in {"phase", "type", "risk", "approval"} and value:
+            result[category] = value
     return result
 
 
@@ -272,7 +337,7 @@ def build_capabilities_prompt(
             "  * Verification",
             "- Wenn der Plan fertig ist:",
             "  * Verschiebe die Karte nach 'review'",
-            "  * Setze Label 'hermes/approval:required' (oder fordere Freigabe per Kommentar)",
+            "  * Setze Label '⏳ Freigabe nötig' (oder fordere Freigabe per Kommentar)",
             "  * Wechsle NICHT selbst nach 'execute' — warte auf die menschliche Freigabe!",
             "",
             "📌 **VERPFLICHTEND:** Wenn du die Beschreibung aktualisierst, MUSS derselbe",
@@ -280,7 +345,7 @@ def build_capabilities_prompt(
             "Beschreibungs-Update OHNE target_status ist ein Vertragsbruch — die Karte",
             "bleibt sonst in ihrer Spalte liegen. Rufe das Tool EINMAL mit allem auf:",
             "  {\"card_id\": ..., \"description\": ..., \"target_status\": \"review\",",
-            "   \"assign_labels\": [\"hermes/approval:required\"]}",
+            "   \"assign_labels\": [\"⏳ Freigabe nötig\"]}",
         ])
     else:  # EXECUTE
         lines.extend([
@@ -295,7 +360,7 @@ def build_capabilities_prompt(
             "- Nach erfolgreicher Abarbeitung aller Subtasks und Verifikation:",
             "  * Verschiebe nach 'review' (NICHT nach 'done' — der Mensch nimmt ab!)",
             "  * Dokumentiere das Gesamtergebnis im Result-Bereich der Beschreibung.",
-            "  * Setze 'hermes/approval:required' für die Abnahme.",
+            "  * Setze '⏳ Freigabe nötig' für die Abnahme.",
         ])
 
     if norm_risk in {"high", "critical"}:
@@ -358,7 +423,7 @@ def check_agent_status_gate(
     ):
         return False, (
             "Gate 1 verletzt: Die Karte befindet sich in der Phase 'plan' und ist noch nicht "
-            "freigegeben (hermes/approval:approved fehlt). Verschiebe nach 'review' für Approval."
+            "freigegeben ('✅ Freigabe erteilt' fehlt). Verschiebe nach 'review' für Approval."
         )
 
     return True, None
@@ -371,23 +436,26 @@ def check_agent_label_gate(
     task_type: Optional[str] = None,
     risk: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Prüft, ob der Agent ein bestimmtes Label selbst setzen darf."""
-    norm = label_to_assign.strip().lower()
+    """Prüft, ob der Agent ein bestimmtes Label selbst setzen darf.
+
+    Akzeptiert Friendly-Titel und technische Keys als ``label_to_assign``.
+    """
+    key = canonical_label_key(label_to_assign) or label_to_assign.strip().lower()
 
     # Agent darf sich nicht selbst Freigabe erteilen
-    if norm == f"{LABEL_PREFIX_APPROVAL}{APPROVAL_APPROVED}":
-        return False, "Gate 1 verletzt: Der Agent darf 'hermes/approval:approved' nicht selbst setzen."
+    if key == f"approval:{APPROVAL_APPROVED}":
+        return False, "Gate 1 verletzt: Der Agent darf 'approval:approved' (✅ Freigabe erteilt) nicht selbst setzen."
 
     # Agent darf nicht eigenmächtig von plan nach execute wechseln, wenn nicht approved
     if (
-        norm == f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}"
+        key == f"phase:{PHASE_EXECUTE}"
         and current_phase == PHASE_PLAN
         and approval_status != APPROVAL_APPROVED
         and gate1_is_mandatory(task_type, risk)
     ):
         return False, (
             "Gate 1 verletzt: Phasenwechsel zu 'execute' erfordert vorherige menschliche Freigabe "
-            "(Label 'hermes/approval:approved')."
+            "(Label '✅ Freigabe erteilt' / approval:approved)."
         )
 
     return True, None
