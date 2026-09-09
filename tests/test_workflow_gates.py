@@ -251,6 +251,24 @@ class TestWorkflowLogic(unittest.TestCase):
             workflow_mod.FRIENDLY_LABELS.update(original)
             workflow_mod._rebuild_aliases()
 
+    def test_has_workflow_label_change(self):
+        """Workflow-Label-Änderungen triggern; irrelevante Labels nicht."""
+        from workflow import has_workflow_label_change, workflow_label_keys
+        # Freigabe erteilen → Trigger
+        self.assertTrue(has_workflow_label_change(
+            ["💡 Planung", "⌛ Freigabe nötig"],
+            ["💡 Planung", "✔️ Freigabe erteilt"],
+        ))
+        # Irrelevantes Label ("Später") → kein Trigger
+        self.assertFalse(has_workflow_label_change(
+            ["💡 Planung"],
+            ["💡 Planung", "Später"],
+        ))
+        # Unverändert → kein Trigger
+        self.assertFalse(has_workflow_label_change(["💡 Planung"], ["💡 Planung"]))
+        # workflow_label_keys filtert auf kanonische Keys
+        self.assertEqual(workflow_label_keys(["💡 Planung", "Später"]), {"phase:plan"})
+
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))
         self.assertTrue(is_backlog_stack({"title": "Ideen"}))

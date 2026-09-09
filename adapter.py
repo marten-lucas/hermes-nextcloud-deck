@@ -25,6 +25,7 @@ try:
         check_agent_status_gate,
         configure_friendly_labels,
         friendly_label_title,
+        has_workflow_label_change,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -55,6 +56,7 @@ except ImportError:  # direct test/import
         check_agent_status_gate,
         configure_friendly_labels,
         friendly_label_title,
+        has_workflow_label_change,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -1044,7 +1046,37 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         # --- LOOPS & SYSTEM-MESSAGE FILTER ---
         # 1. Ignoriere eigene Nachrichten, leere Absender sowie reservierte System-Accounts
-        if last_author and (
+        #    AUSNAHME: Hat ein Mensch seit dem letzten Lauf Workflow-Labels geändert
+        #    (z. B. Freigabe erteilt), wird der Filter übersprungen — die Label-
+        #    Änderung ist ein echter Trigger, auch wenn der Agent zuletzt kommentierte.
+        label_titles = self._card_label_titles(card)
+        snapshot = DeckCardSnapshot(
+            board_id=board_id,
+            stack_id=stack_id,
+            card_id=card_id,
+            title=str(card.get("title") or ""),
+            description=str(card.get("description") or ""),
+            assigned_users=self.identity.assigned_uids(card),
+            labels=label_titles,
+            last_comment_id=str(last.get("id")) if last.get("id") else None,
+            last_author=last_author,
+            due_date=str(card.get("duedate")) if card.get("duedate") else None,
+            done=card.get("done"),
+        )
+        human_label_change = (
+            self.state.label_changed_since_baseline(snapshot)
+            and has_workflow_label_change(
+                self.state._last_labels.get(f"{board_id}:{card_id}", []),
+                label_titles,
+            )
+        )
+        if human_label_change:
+            logger.info(
+                "Deck: Workflow-Label-Änderung auf Karte %s erkannt (%s) — Trigger trotz Agent-eigenem Kommentar.",
+                card_id,
+                ", ".join(label_titles),
+            )
+        elif last_author and (
             last_author == self.runtime.username
             or last_author == self.runtime.hermes_user_id
             or last_author.lower() in {*self.runtime.bot_aliases, "system", "changelog", "sample"}
@@ -1068,21 +1100,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.debug("Nextcloud Deck: Ignoriere automatische System-Textnachricht auf Karte %s", card_id)
             return
         # -------------------------------------
-
-        label_titles = self._card_label_titles(card)
-        snapshot = DeckCardSnapshot(
-            board_id=board_id,
-            stack_id=stack_id,
-            card_id=card_id,
-            title=str(card.get("title") or ""),
-            description=str(card.get("description") or ""),
-            assigned_users=self.identity.assigned_uids(card),
-            labels=label_titles,
-            last_comment_id=str(last.get("id")) if last.get("id") else None,
-            last_author=last_author,
-            due_date=str(card.get("duedate")) if card.get("duedate") else None,
-            done=card.get("done"),
-        )
 
         if not self.state.should_process(snapshot):
             return

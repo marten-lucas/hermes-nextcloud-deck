@@ -54,6 +54,10 @@ class DeckStateManager:
 
     def __init__(self) -> None:
         self._fingerprints: Dict[str, str] = {}
+        # Letzter bekannter Workflow-Label-Zustand pro Karte (kanonische Keys),
+        # um menschenseitige Label-Änderungen als Trigger zu erkennen — auch
+        # wenn der letzte Kommentar vom Agenten selbst stammt.
+        self._last_labels: Dict[str, List[str]] = {}
 
     def should_process(self, snapshot: DeckCardSnapshot) -> bool:
         key = f"{snapshot.board_id}:{snapshot.card_id}"
@@ -62,9 +66,24 @@ class DeckStateManager:
             return False
         return True
 
+    def label_changed_since_baseline(self, snapshot: DeckCardSnapshot) -> bool:
+        """True, wenn sich die Labels seit der letzten Baseline geändert haben.
+
+        Wird VOR dem Eigen-Kommentar-Filter geprüft: Eine menschliche
+        Label-Änderung (z. B. Freigabe erteilen) soll den Agenten triggern,
+        auch wenn der Agent selbst den letzten Kommentar geschrieben hat.
+        """
+        key = f"{snapshot.board_id}:{snapshot.card_id}"
+        baseline = self._last_labels.get(key)
+        if baseline is None:
+            return False  # keine Baseline → kein Vergleich möglich
+        return sorted(baseline) != sorted(snapshot.labels or [])
+
     def mark_processed(self, snapshot: DeckCardSnapshot) -> None:
         key = f"{snapshot.board_id}:{snapshot.card_id}"
         self._fingerprints[key] = snapshot.fingerprint()
+        self._last_labels[key] = list(snapshot.labels or [])
 
     def forget(self, board_id: str, card_id: str) -> None:
         self._fingerprints.pop(f"{board_id}:{card_id}", None)
+        self._last_labels.pop(f"{board_id}:{card_id}", None)

@@ -132,6 +132,31 @@ def friendly_label_title(canonical_key: str) -> str:
     entry = FRIENDLY_LABELS.get(str(canonical_key or "").strip().lower())
     return entry[0] if entry else str(canonical_key)
 
+
+def workflow_label_keys(label_titles: List[str]) -> Set[str]:
+    """Filtert die Workflow-relevanten kanonischen Keys aus Label-Titeln.
+
+    Nur Änderungen an diesen Labels sind Trigger-relevant (sinnvoll):
+    phase, approval, risk, type. Beliebige andere Board-Labels (z. B.
+    "Später") lösen bewusst KEINEN Agent-Turn aus.
+    """
+    keys: Set[str] = set()
+    for title in label_titles or []:
+        key = canonical_label_key(str(title or ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def has_workflow_label_change(old_labels: List[str], new_labels: List[str]) -> bool:
+    """Prüft, ob sich die Workflow-relevanten Labels zwischen zwei Zuständen unterscheiden.
+
+    Wird genutzt, damit menschenseitige Label-Änderungen (z. B. Freigabe
+    erteilen) den Agenten triggern — auch wenn der letzte Kommentar vom
+    Agenten selbst stammt (Eigen-Kommentar-Filter wird dann übersprungen).
+    """
+    return workflow_label_keys(old_labels or []) != workflow_label_keys(new_labels or [])
+
 PHASE_PLAN = "plan"
 PHASE_EXECUTE = "execute"
 
