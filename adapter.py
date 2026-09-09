@@ -23,6 +23,7 @@ try:
         canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
+        configure_friendly_labels,
         friendly_label_title,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
@@ -52,6 +53,7 @@ except ImportError:  # direct test/import
         canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
+        configure_friendly_labels,
         friendly_label_title,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
@@ -260,6 +262,16 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         destructive_patterns = [p.strip() for p in raw_destructive.split(",") if p.strip()]
     elif isinstance(raw_destructive, list):
         destructive_patterns = [str(p).strip() for p in raw_destructive if str(p).strip()]
+
+    # Friendly-Label-Mapping aus der Config (platforms.deck.extra.label_mapping).
+    # Fehlt es, gilt das Default-Mapping in workflow.py. Wird global angewendet,
+    # damit alle Adapter-Instanzen (und der Prompt-Bau) dasselbe Mapping nutzen.
+    label_mapping = extra.get("label_mapping")
+    if isinstance(label_mapping, dict) and label_mapping:
+        try:
+            configure_friendly_labels(label_mapping)
+        except Exception as exc:
+            logger.warning("Deck: label_mapping aus Config konnte nicht angewendet werden: %s", exc)
 
     return DeckRuntimeConfig(
         base_url=base_url,
@@ -759,7 +771,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     async def _apply_label_to_card(self, card_id: str, label_title: str) -> tuple[bool, Optional[str]]:
         """Weist der Karte ein Label zu (erstellt das Label bei Bedarf auf dem Board).
 
-        Akzeptiert Friendly-Titel ("⏳ Freigabe nötig") und kanonische Keys
+        Akzeptiert Friendly-Titel ("⌛ Freigabe nötig") und kanonische Keys
         ("approval:required") sowie die alte technische Form ("hermes/approval:required").
         Im Board wird das Label immer im Friendly-Format mit Mapping-Farbe angelegt.
         """
@@ -1352,7 +1364,7 @@ DECK_CARD_ACTION_SCHEMA = {
         "Labels zuweisen/entfernen oder einen Benutzer zuweisen/entfernen. "
         "Nutze dieses Tool statt einen Kommentar zu schreiben, wenn du den "
         "Workflow-Vertrag erfüllen willst (Plan in die Description schreiben, "
-        "nach 'review' schieben, '⏳ Freigabe nötig' setzen)."
+        f"nach 'review' schieben, '{friendly_label_title('approval:required')}' setzen)."
     ),
     "parameters": {
         "type": "object",
@@ -1372,12 +1384,19 @@ DECK_CARD_ACTION_SCHEMA = {
             "assign_labels": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Labels, die der Karte zugewiesen werden sollen. Friendly-Titel oder kanonische Keys, z. B. ['⏳ Freigabe nötig'] oder ['approval:required'].",
+                "description": (
+                    "Labels, die der Karte zugewiesen werden sollen. Friendly-Titel oder "
+                    f"kanonische Keys, z. B. ['{friendly_label_title('approval:required')}'] "
+                    "oder ['approval:required']."
+                ),
             },
             "remove_labels": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Labels, die entfernt werden sollen, z. B. ['🟡 Planung'] oder ['phase:plan'].",
+                "description": (
+                    "Labels, die entfernt werden sollen, z. B. "
+                    f"['{friendly_label_title('phase:plan')}'] oder ['phase:plan']."
+                ),
             },
             "assign_user": {
                 "type": "string",

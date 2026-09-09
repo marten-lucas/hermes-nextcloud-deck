@@ -190,10 +190,10 @@ class TestWorkflowLogic(unittest.TestCase):
         """Friendly-Titel werden auf kanonische Keys gemappt."""
         card = {
             "labels": [
-                {"title": "🔴 Risiko: Hoch"},
-                {"title": "⏳ Freigabe nötig"},
-                {"title": "🟢 Umsetzung"},
-                {"title": "🟡 Planung"},  # letzte Phase gewinnt
+                {"title": "⚠️ Risiko: Hoch"},
+                {"title": "⌛ Freigabe nötig"},
+                {"title": "🚀 In Umsetzung"},
+                {"title": "💡 Planung"},  # letzte Phase gewinnt
             ]
         }
         extracted = extract_hermes_labels(card)
@@ -207,21 +207,49 @@ class TestWorkflowLogic(unittest.TestCase):
         for variant in [
             "hermes/approval:required",
             "approval:required",
-            "⏳ Freigabe nötig",
+            "⌛ Freigabe nötig",
             "freigabe nötig",
         ]:
             self.assertEqual(canonical_label_key(variant), "approval:required", variant)
-        self.assertEqual(canonical_label_key("🟡 Planung"), "phase:plan")
+        self.assertEqual(canonical_label_key("💡 Planung"), "phase:plan")
         self.assertEqual(canonical_label_key("Unbekanntes Label"), None)
-        self.assertEqual(friendly_label_title("phase:plan"), "🟡 Planung")
+        self.assertEqual(friendly_label_title("phase:plan"), "💡 Planung")
         self.assertEqual(friendly_label_title("unbekannt"), "unbekannt")
 
     def test_label_gate_accepts_friendly_and_canonical(self):
         """Label-Gate blockt Selbst-Freigabe in beiden Schreibweisen."""
-        for variant in ["hermes/approval:approved", "approval:approved", "✅ Freigabe erteilt"]:
+        for variant in ["hermes/approval:approved", "approval:approved", "✔️ Freigabe erteilt"]:
             allowed, reason = check_agent_label_gate(variant, "plan")
             self.assertFalse(allowed, variant)
             self.assertIn("Gate 1", reason)
+
+    def test_configure_friendly_labels_from_config(self):
+        """Label-Mapping wird dynamisch aus der Config geladen und angewendet."""
+        import workflow as workflow_mod
+        from workflow import canonical_label_key, friendly_label_title
+
+        original = dict(workflow_mod.FRIENDLY_LABELS)
+        try:
+            workflow_mod.configure_friendly_labels({
+                "phase:plan": {"title": "🎯 Eigenes Planung", "color": "ABC123"},
+                "risk:high": ["🆘 Kritisch", "FF0000"],  # kompakte Listen-Form
+            })
+            self.assertEqual(friendly_label_title("phase:plan"), "🎯 Eigenes Planung")
+            self.assertEqual(workflow_mod.FRIENDLY_LABELS["phase:plan"][1], "ABC123")
+            self.assertEqual(friendly_label_title("risk:high"), "🆘 Kritisch")
+            # Nicht genannte Keys behalten das Default-Mapping
+            self.assertEqual(friendly_label_title("approval:required"), "⌛ Freigabe nötig")
+            # Aliase werden mit neu gebaut
+            self.assertEqual(canonical_label_key("🎯 Eigenes Planung"), "phase:plan")
+            self.assertEqual(canonical_label_key("🆘 Kritisch"), "risk:high")
+            # Ungültige Einträge werden ignoriert
+            workflow_mod.configure_friendly_labels({"phase:plan": {"title": "", "color": ""}})
+            self.assertEqual(friendly_label_title("phase:plan"), "🎯 Eigenes Planung")
+        finally:
+            # Original-Mapping wiederherstellen (kein Test-Pollution)
+            workflow_mod.FRIENDLY_LABELS.clear()
+            workflow_mod.FRIENDLY_LABELS.update(original)
+            workflow_mod._rebuild_aliases()
 
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))

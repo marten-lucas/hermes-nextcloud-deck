@@ -23,36 +23,86 @@ LABEL_PREFIX_APPROVAL = "hermes/approval:"
 #   FRIENDLY_LABELS: kanonischer Key -> (Anzeige-Titel, Farbe)
 #   LABEL_ALIASES:   beliebiger Titel (friendly/technisch) -> kanonischer Key
 # ---------------------------------------------------------------------------
-FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
-    "phase:plan": ("🟡 Planung", "F1DB50"),
-    "phase:execute": ("🟢 Umsetzung", "31CC7C"),
-    "type:implementation": ("🔧 Umsetzungsaufgabe", "317CCC"),
-    "type:documentation": ("📄 Dokumentation", "317CCC"),
-    "risk:high": ("🔴 Risiko: Hoch", "FF7A66"),
-    "risk:low": ("🟢 Risiko: Gering", "31CC7C"),
-    "approval:required": ("⏳ Freigabe nötig", "FF7A66"),
-    "approval:approved": ("✅ Freigabe erteilt", "31CC7C"),
+_DEFAULT_FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
+    "phase:plan": ("\U0001F4A1 Planung", "FAD7A0"),
+    "phase:execute": ("\U0001F680 In Umsetzung", "AED6F1"),
+    "approval:required": ("\u231B Freigabe n\u00F6tig", "FCF3CF"),
+    "approval:approved": ("\u2714\uFE0F Freigabe erteilt", "D4EFDF"),
+    "risk:low": ("\U0001F7E2 Risiko: Gering", "A9DFBF"),
+    "risk:high": ("\u26A0\uFE0F Risiko: Hoch", "FADBD8"),
+    "type:implementation": ("\U0001F6E0\uFE0F Umsetzungsaufgabe", "D6EAF8"),
+    "type:documentation": ("\U0001F4DA Dokumentation", "D7BDE2"),
 }
+
+# Aktives Mapping (wird ggf. durch configure_friendly_labels ersetzt)
+FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = dict(_DEFAULT_FRIENDLY_LABELS)
 
 # Aliase: normalisierter Titel -> kanonischer Key ("phase:plan" etc.)
 LABEL_ALIASES: Dict[str, str] = {}
-for _key, (_title, _color) in FRIENDLY_LABELS.items():
-    LABEL_ALIASES[_title.strip().lower()] = _key
-    LABEL_ALIASES[f"hermes/{_key}"] = _key
-# Zusätzliche Schreibweisen, die der Agent nutzen könnte
-LABEL_ALIASES.update({
-    "planung": "phase:plan",
-    "plan": "phase:plan",
-    "umsetzung": "phase:execute",
-    "execute": "phase:execute",
-    "freigabe nötig": "approval:required",
-    "freigabe noetig": "approval:required",
-    "freigabe erteilt": "approval:approved",
-    "risiko: hoch": "risk:high",
-    "risiko: gering": "risk:low",
-    "dokumentation": "type:documentation",
-    "umsetzungsaufgabe": "type:implementation",
-})
+
+
+def _rebuild_aliases() -> None:
+    """Baut LABEL_ALIASES aus dem aktiven FRIENDLY_LABELS neu auf."""
+    LABEL_ALIASES.clear()
+    for _key, (_title, _color) in FRIENDLY_LABELS.items():
+        LABEL_ALIASES[_title.strip().lower()] = _key
+        LABEL_ALIASES[f"hermes/{_key}"] = _key
+    # Zus\u00E4tzliche Schreibweisen, die der Agent nutzen k\u00F6nnte
+    LABEL_ALIASES.update({
+        "planung": "phase:plan",
+        "plan": "phase:plan",
+        "in umsetzung": "phase:execute",
+        "umsetzung": "phase:execute",
+        "execute": "phase:execute",
+        "freigabe n\u00F6tig": "approval:required",
+        "freigabe noetig": "approval:required",
+        "freigabe erteilt": "approval:approved",
+        "risiko: hoch": "risk:high",
+        "risiko: gering": "risk:low",
+        "dokumentation": "type:documentation",
+        "umsetzungsaufgabe": "type:implementation",
+    })
+
+
+_rebuild_aliases()
+
+
+def configure_friendly_labels(mapping_config: Any) -> None:
+    """\u00DCberschreibt das Friendly-Label-Mapping aus der Plugin-Config.
+
+    Erwartetes Format (config.yaml, platforms.deck.extra.label_mapping):
+        phase:plan:
+          title: "\U0001F4A1 Planung"
+          color: "FAD7A0"
+    Alternativ auch kompakt: {"phase:plan": ["\U0001F4A1 Planung", "FAD7A0"], ...}
+    Unvollst\u00E4ndige/ung\u00FCltige Eintr\u00E4ge werden ignoriert; das Default-Mapping
+    bleibt f\u00FCr nicht genannte Keys bestehen.
+    """
+    if not isinstance(mapping_config, dict) or not mapping_config:
+        return
+    new_mapping: Dict[str, Tuple[str, str]] = dict(FRIENDLY_LABELS)
+    for key, entry in mapping_config.items():
+        canonical = str(key or "").strip().lower()
+        canonical = LABEL_ALIASES.get(canonical) or canonical
+        if not canonical:
+            continue
+        if isinstance(entry, dict):
+            title = str(entry.get("title") or "").strip()
+            color = str(entry.get("color") or "").strip().lstrip("#")
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            title = str(entry[0]).strip()
+            color = str(entry[1]).strip().lstrip("#")
+        else:
+            logger.warning("Deck: Ung\u00FCltiger label_mapping-Eintrag f\u00FCr '%s' \u2014 ignoriert.", key)
+            continue
+        if not title or not color:
+            logger.warning("Deck: Unvollst\u00E4ndiger label_mapping-Eintrag f\u00FCr '%s' \u2014 ignoriert.", key)
+            continue
+        new_mapping[canonical] = (title, color)
+    FRIENDLY_LABELS.clear()
+    FRIENDLY_LABELS.update(new_mapping)
+    _rebuild_aliases()
+    logger.info("Deck: Friendly-Label-Mapping aus Config geladen (%d Eintr\u00E4ge).", len(FRIENDLY_LABELS))
 
 
 def canonical_label_key(label_title: str) -> Optional[str]:
@@ -264,7 +314,7 @@ def parse_subtasks(description: str) -> SubtaskProgress:
 def extract_hermes_labels(card: Dict[str, Any]) -> Dict[str, str]:
     """Liest strukturierte Workflow-Labels aus einer Karte.
 
-    Akzeptiert sowohl Friendly-Titel ("🟡 Planung") als auch technische
+    Akzeptiert sowohl Friendly-Titel ("� Planung") als auch technische
     ("hermes/phase:plan"). Gibt ein Dict zurück mit Schlüsseln wie
     'phase', 'type', 'risk', 'approval' (kanonische Werte).
     """
@@ -326,6 +376,7 @@ def build_capabilities_prompt(
     ]
 
     if norm_phase == PHASE_PLAN:
+        lbl_approval = friendly_label_title("approval:required")
         lines.extend([
             "**MODUS: PLAN / KONZEPTION (READ-ONLY)**",
             "- Du befindest dich in der Planungsphase. Führe KEINE produktiven Änderungen an Systemen durch.",
@@ -337,7 +388,7 @@ def build_capabilities_prompt(
             "  * Verification",
             "- Wenn der Plan fertig ist:",
             "  * Verschiebe die Karte nach 'review'",
-            "  * Setze Label '⏳ Freigabe nötig' (oder fordere Freigabe per Kommentar)",
+            f"  * Setze Label '{lbl_approval}' (oder fordere Freigabe per Kommentar)",
             "  * Wechsle NICHT selbst nach 'execute' — warte auf die menschliche Freigabe!",
             "",
             "📌 **VERPFLICHTEND:** Wenn du die Beschreibung aktualisierst, MUSS derselbe",
@@ -345,9 +396,10 @@ def build_capabilities_prompt(
             "Beschreibungs-Update OHNE target_status ist ein Vertragsbruch — die Karte",
             "bleibt sonst in ihrer Spalte liegen. Rufe das Tool EINMAL mit allem auf:",
             "  {\"card_id\": ..., \"description\": ..., \"target_status\": \"review\",",
-            "   \"assign_labels\": [\"⏳ Freigabe nötig\"]}",
+            f"   \"assign_labels\": [\"{lbl_approval}\"]}}",
         ])
     else:  # EXECUTE
+        lbl_approval = friendly_label_title("approval:required")
         lines.extend([
             "**MODUS: EXECUTE / UMSETZUNG**",
             "- Der Plan wurde freigegeben. Setze die Subtasks aus der Beschreibung sequenziell um.",
@@ -360,7 +412,7 @@ def build_capabilities_prompt(
             "- Nach erfolgreicher Abarbeitung aller Subtasks und Verifikation:",
             "  * Verschiebe nach 'review' (NICHT nach 'done' — der Mensch nimmt ab!)",
             "  * Dokumentiere das Gesamtergebnis im Result-Bereich der Beschreibung.",
-            "  * Setze '⏳ Freigabe nötig' für die Abnahme.",
+            f"  * Setze '{lbl_approval}' für die Abnahme.",
         ])
 
     if norm_risk in {"high", "critical"}:
@@ -423,7 +475,7 @@ def check_agent_status_gate(
     ):
         return False, (
             "Gate 1 verletzt: Die Karte befindet sich in der Phase 'plan' und ist noch nicht "
-            "freigegeben ('✅ Freigabe erteilt' fehlt). Verschiebe nach 'review' für Approval."
+            f"freigegeben ('{friendly_label_title('approval:approved')}' fehlt). Verschiebe nach 'review' für Approval."
         )
 
     return True, None
@@ -444,7 +496,10 @@ def check_agent_label_gate(
 
     # Agent darf sich nicht selbst Freigabe erteilen
     if key == f"approval:{APPROVAL_APPROVED}":
-        return False, "Gate 1 verletzt: Der Agent darf 'approval:approved' (✅ Freigabe erteilt) nicht selbst setzen."
+        return False, (
+            f"Gate 1 verletzt: Der Agent darf '{friendly_label_title('approval:approved')}' "
+            "(approval:approved) nicht selbst setzen."
+        )
 
     # Agent darf nicht eigenmächtig von plan nach execute wechseln, wenn nicht approved
     if (
@@ -455,7 +510,7 @@ def check_agent_label_gate(
     ):
         return False, (
             "Gate 1 verletzt: Phasenwechsel zu 'execute' erfordert vorherige menschliche Freigabe "
-            "(Label '✅ Freigabe erteilt' / approval:approved)."
+            f"(Label '{friendly_label_title('approval:approved')}' / approval:approved)."
         )
 
     return True, None
