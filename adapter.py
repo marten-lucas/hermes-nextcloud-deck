@@ -659,6 +659,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         current_card = await self.client.get_card(board_id, stack_id, card_id)
         if current_card:
+            # Idempotenz: Ist das Label bereits auf der Karte, ist die Zuweisung
+            # ein No-Op (verhindert Duplikate, wenn der Agent deck_card_action
+            # mit demselben assign_labels mehrfach aufruft).
+            existing_titles = {
+                str(lbl.get("title") or "").strip().lower()
+                for lbl in (current_card.get("labels") or [])
+                if isinstance(lbl, dict)
+            }
+            if label_title.strip().lower() in existing_titles:
+                logger.debug("Deck: Label '%s' ist bereits auf Karte %s — übersprungen.", label_title, card_id)
+                return True, None
+
             hermes_labels = extract_hermes_labels(current_card)
             phase = hermes_labels.get("phase") or PHASE_PLAN
             approval = hermes_labels.get("approval")
