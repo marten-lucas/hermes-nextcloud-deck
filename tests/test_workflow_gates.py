@@ -419,6 +419,53 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.adapter.client.move_card.assert_called_once_with("7", "2", "42", "3")
 
+    async def test_send_auto_moves_to_review_on_description_without_target_status(self):
+        """b-Fix: Beschreibung ohne target_status → deterministischer Auto-Move nach review."""
+        self.adapter._locate_card = AsyncMock(return_value=("7", "1"))
+        # Karte in 'todo' (Stack 1), Phase plan, low risk → Auto-Move erlaubt
+        self.adapter.client.get_card = AsyncMock(return_value={
+            "labels": [{"title": "hermes/phase:plan"}, {"title": "hermes/risk:low"}]
+        })
+        self.adapter.client.get_stacks = AsyncMock(return_value=[
+            {"id": "1", "title": "Todo"},
+            {"id": "3", "title": "Review"},
+        ])
+        self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
+        self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.update_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.add_comment = AsyncMock(return_value={"id": 100})
+
+        result = await self.adapter.send(
+            chat_id="deck:board:7:card:42",
+            content="",
+            metadata={"description": "# Plan\n- [ ] Schritt 1"},
+        )
+        self.assertTrue(result.success)
+        self.adapter.client.move_card.assert_called_once_with("7", "1", "42", "3")
+        self.adapter.client.update_card.assert_called_once()
+
+    async def test_send_no_auto_move_when_card_already_in_review(self):
+        """Auto-Move darf nicht greifen, wenn die Karte schon in review/blocked/done liegt."""
+        self.adapter._locate_card = AsyncMock(return_value=("7", "3"))
+        self.adapter.client.get_card = AsyncMock(return_value={
+            "labels": [{"title": "hermes/phase:plan"}]
+        })
+        self.adapter.client.get_stacks = AsyncMock(return_value=[
+            {"id": "3", "title": "Review"},
+        ])
+        self.adapter.client.update_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.add_comment = AsyncMock(return_value={"id": 100})
+
+        result = await self.adapter.send(
+            chat_id="deck:board:7:card:42",
+            content="",
+            metadata={"description": "# Plan aktualisiert"},
+        )
+        self.assertTrue(result.success)
+        self.adapter.client.move_card.assert_not_called()
+        self.adapter.client.update_card.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

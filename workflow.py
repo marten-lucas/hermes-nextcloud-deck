@@ -274,6 +274,13 @@ def build_capabilities_prompt(
             "  * Verschiebe die Karte nach 'review'",
             "  * Setze Label 'hermes/approval:required' (oder fordere Freigabe per Kommentar)",
             "  * Wechsle NICHT selbst nach 'execute' — warte auf die menschliche Freigabe!",
+            "",
+            "📌 **VERPFLICHTEND:** Wenn du die Beschreibung aktualisierst, MUSS derselbe",
+            "`deck_card_action`-Aufruf auch `target_status: \"review\"` enthalten. Ein",
+            "Beschreibungs-Update OHNE target_status ist ein Vertragsbruch — die Karte",
+            "bleibt sonst in ihrer Spalte liegen. Rufe das Tool EINMAL mit allem auf:",
+            "  {\"card_id\": ..., \"description\": ..., \"target_status\": \"review\",",
+            "   \"assign_labels\": [\"hermes/approval:required\"]}",
         ])
     else:  # EXECUTE
         lines.extend([

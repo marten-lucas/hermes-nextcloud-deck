@@ -22,6 +22,7 @@ try:
         build_capabilities_prompt,
         check_agent_label_gate,
         check_agent_status_gate,
+        STATUS_REVIEW,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -47,6 +48,7 @@ except ImportError:  # direct test/import
         build_capabilities_prompt,
         check_agent_label_gate,
         check_agent_status_gate,
+        STATUS_REVIEW,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -522,6 +524,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         card_action_taken = False
 
+        # Deterministische Workflow-Durchsetzung (b): Schreibt der Agent eine
+        # neue Beschreibung (Plan/Ergebnis), OHNE target_status anzugeben, wird
+        # die Karte automatisch nach 'review' verschoben. Begründung: Der
+        # Agent vergisst erfahrungsgemäß target_status im selben Call — der
+        # Adapter erzwingt damit den Vertrags-Übergang (Plan fertig → Review)
+        # zuverlässig, ohne auf das LLM-Verhalten zu vertrauen.
+        auto_move_reason = None
+        if new_description and not target_status:
+            auto_move_reason = await self._auto_move_review_check(card_id)
+            if auto_move_reason:
+                target_status = STATUS_REVIEW
+
         if target_status:
             moved, err = await self._move_card_to_status(card_id, str(target_status))
             if not moved:
@@ -533,6 +547,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                         pass
                 return SendResult(success=False, error=err or f"Could not move card {card_id} to status '{target_status}'")
             card_action_taken = True
+
+        if auto_move_reason:
+            logger.info(
+                "Deck: Auto-Move Karte %s nach 'review' (%s) — Agent hat target_status weggelassen.",
+                card_id,
+                auto_move_reason,
+            )
 
         if new_description:
             updated = await self._update_card_description(card_id, str(new_description))
@@ -603,6 +624,67 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.info("Deck: Home-Channel-Meldung in %s protokolliert", log_path)
         except Exception as exc:
             logger.warning("Deck: Konnte Home-Log nicht schreiben (%s): %s", log_path, exc)
+
+    async def _auto_move_review_check(self, card_id: str) -> Optional[str]:
+        """Prüft, ob ein Auto-Move nach 'review' gerechtfertigt ist (b-Fix).
+
+        Bedingungen: Die Karte ist auffindbar, befindet sich in einer
+        Vor-Stufe (todo/ready/running) und der Agent liefert eine
+        Beschreibung ohne target_status. Gibt die Begründung zurück (oder
+        None, wenn kein Auto-Move erfolgen soll — z. B. Karte schon in
+        review/blocked/done, oder Gate würde den Move blockieren).
+        """
+        try:
+            location = await self._locate_card(card_id)
+            if location is None:
+                return None
+            board_id, stack_id = location
+            current_card = await self.client.get_card(board_id, stack_id, card_id)
+            if not current_card:
+                return None
+
+            # Aktueller Stack-Titel → Status-Key normalisieren
+            stacks = await self.client.get_stacks(board_id)
+            current_status = None
+            for st in stacks or []:
+                if str(st.get("id")) == str(stack_id):
+                    title = str(st.get("title") or "").strip().lower()
+                    # Kanonische Status-Keys: backlog|triage|todo|ready|running|review|blocked|done
+                    aliases = {
+                        "to do": "todo", "in progress": "running",
+                        "in bearbeitung": "running", "arbeit": "running",
+                        "prüfung": "review", "pruefung": "review",
+                        "erledigt": "done", "fertig": "done",
+                    }
+                    current_status = aliases.get(title, title)
+                    break
+            if current_status is None:
+                return None
+
+            # Nur aus Vor-Stufen nach review schieben
+            if current_status not in {"todo", "ready", "running"}:
+                return None
+
+            # Gate-Prüfung (gleiche Regeln wie beim expliziten Move)
+            hermes_labels = extract_hermes_labels(current_card)
+            phase = hermes_labels.get("phase") or PHASE_PLAN
+            approval = hermes_labels.get("approval")
+            task_type = hermes_labels.get("type")
+            risk = hermes_labels.get("risk")
+            allowed, reason = check_agent_status_gate(
+                STATUS_REVIEW, phase, approval, task_type, risk
+            )
+            if not allowed:
+                logger.info(
+                    "Deck: Auto-Move nach 'review' für Karte %s durch Gate blockiert: %s",
+                    card_id,
+                    reason,
+                )
+                return None
+            return f"Beschreibung geschrieben in '{current_status}' ohne target_status"
+        except Exception as exc:
+            logger.warning("Deck: Auto-Move-Check für Karte %s fehlgeschlagen: %s", card_id, exc)
+            return None
 
     async def _update_card_description(self, card_id: str, description: str) -> bool:
         """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards)."""
