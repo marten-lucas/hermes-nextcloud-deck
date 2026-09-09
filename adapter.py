@@ -727,7 +727,25 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         try:
             result = await self.client.move_card(board_id, stack_id, card_id, target_stack_id)
-            return (result is not None), None
+            if result is None:
+                return False, f"Move of card {card_id} to stack {target_stack_id} failed (empty response)"
+            # Verifikation: Die Deck-API kann Moves still fehlschlagen lassen
+            # (HTTP 200, aber keine Änderung). Daher den tatsächlichen Stack
+            # nach dem Move prüfen (curl-verifiziert 2026-09-09).
+            verify_location = await self._locate_card(card_id)
+            if verify_location is not None:
+                _, actual_stack_id = verify_location
+                if str(actual_stack_id) != str(target_stack_id):
+                    logger.warning(
+                        "Deck: Move-Verifikation fehlgeschlagen für Karte %s: erwartet Stack %s, tatsächlich %s",
+                        card_id, target_stack_id, actual_stack_id,
+                    )
+                    return False, f"Card {card_id} did not move to stack {target_stack_id} (silent API failure)"
+            logger.info(
+                "Deck: Karte %s nach Stack %s ('%s') verschoben und verifiziert.",
+                card_id, target_stack_id, status_key,
+            )
+            return True, None
         except NextcloudDeckError as exc:
             logger.warning("Deck card move failed for card %s: %s", card_id, exc)
             return False, str(exc)

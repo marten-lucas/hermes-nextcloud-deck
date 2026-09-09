@@ -187,12 +187,14 @@ class NextcloudDeckClient:
         target_stack_id: str | int,
         order: int = 0,
     ) -> Optional[Dict[str, Any]]:
-        # Hinweis: Der reorder-Endpoint gibt ein ARRAY der Karten im Ziel-Stack
-        # zurück (nicht ein einzelnes Karten-Dict). Daher gilt: jede nicht-leere
-        # Antwort = Erfolg.
+        # WICHTIG (curl-verifiziert 2026-09-09): Der reorder-Endpoint erwartet
+        # die ZIEL-Stack-ID im URL-Pfad, nicht die Quell-Stack-ID. Mit der
+        # Quelle im Pfad antwortet die API mit HTTP 200 + Array, verschiebt
+        # die Karte aber NICHT (stiller Fehlschlag). Body: {"stackId": <Ziel>,
+        # "order": n}. Die Antwort ist ein ARRAY der Karten im Ziel-Stack.
         data = await self._request(
             "PUT",
-            f"boards/{board_id}/stacks/{stack_id}/cards/{card_id}/reorder",
+            f"boards/{board_id}/stacks/{target_stack_id}/cards/{card_id}/reorder",
             json={"stackId": target_stack_id, "order": int(order)},
         )
         if isinstance(data, dict):

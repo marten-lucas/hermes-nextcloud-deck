@@ -405,7 +405,8 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Gate 2", self.adapter.client.add_comment.call_args[0][1])
 
     async def test_send_allows_valid_move_to_review(self):
-        self.adapter._locate_card = AsyncMock(return_value=("7", "2"))
+        # _locate_card: 1. Aufruf (vor Move) → Quell-Stack 2; danach (Verifikation) → Ziel-Stack 3
+        self.adapter._locate_card = AsyncMock(side_effect=[("7", "2"), ("7", "3")])
         self.adapter.client.get_card = AsyncMock(return_value={"labels": [{"title": "hermes/phase:plan"}]})
         self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
         self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
@@ -419,9 +420,27 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.adapter.client.move_card.assert_called_once_with("7", "2", "42", "3")
 
+    async def test_send_move_verification_failure_detected(self):
+        """Move-Verifikation: stiller API-Fehlschlag (Karte nicht im Ziel-Stack) wird erkannt."""
+        self.adapter._locate_card = AsyncMock(return_value=("7", "2"))  # bleibt immer im Quell-Stack
+        self.adapter.client.get_card = AsyncMock(return_value={"labels": [{"title": "hermes/phase:plan"}]})
+        self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
+        self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.add_comment = AsyncMock(return_value={"id": 100})
+
+        result = await self.adapter.send(
+            chat_id="deck:board:7:card:42",
+            content="Plan fertig",
+            metadata={"target_status": "review"},
+        )
+        self.assertFalse(result.success)
+        self.assertIn("silent API failure", result.error)
+
     async def test_send_auto_moves_to_review_on_description_without_target_status(self):
         """b-Fix: Beschreibung ohne target_status → deterministischer Auto-Move nach review."""
-        self.adapter._locate_card = AsyncMock(return_value=("7", "1"))
+        # 1. Aufruf: Auto-Move-Check (Quell-Stack 1); 2.: Move selbst; 3.: Verifikation (Ziel 3);
+        # weitere Aufrufe (z. B. Re-Baseline) → Ziel-Stack 3
+        self.adapter._locate_card = AsyncMock(side_effect=[("7", "1"), ("7", "1"), ("7", "3"), ("7", "3")])
         # Karte in 'todo' (Stack 1), Phase plan, low risk → Auto-Move erlaubt
         self.adapter.client.get_card = AsyncMock(return_value={
             "labels": [{"title": "hermes/phase:plan"}, {"title": "hermes/risk:low"}]
