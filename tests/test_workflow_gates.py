@@ -269,6 +269,31 @@ class TestWorkflowLogic(unittest.TestCase):
         # workflow_label_keys filtert auf kanonische Keys
         self.assertEqual(workflow_label_keys(["💡 Planung", "Später"]), {"phase:plan"})
 
+    def test_description_matches_template(self):
+        """Format-Prüfung erkennt valide vs. unausgefüllte/leere Descriptions."""
+        from workflow import description_matches_template, TEMPLATE_DESCRIPTION
+
+        # Roh-Vorlage mit Platzhaltern → NICHT gültig
+        self.assertFalse(description_matches_template(TEMPLATE_DESCRIPTION))
+
+        # Leer → nicht gültig
+        self.assertFalse(description_matches_template(""))
+        self.assertFalse(description_matches_template("  "))
+
+        # Valide ausgefüllte Karte
+        valid = (
+            "# Objective\nTermin ermitteln\n\n"
+            "# Context\nTest\n\n"
+            "# Acceptance Criteria\n- [x] Datum ermittelt\n\n"
+            "# Plan\n## Subtasks\n- [x] 1. Datum holen\n\n"
+            "# Verification\ndate ausgeführt\n\n"
+            "# Result\nErledigt"
+        )
+        self.assertTrue(description_matches_template(valid))
+
+        # Fehlende Kernabschnitte → nicht gültig
+        self.assertFalse(description_matches_template("# Objective\nNur Ziel ohne Plan\n- [ ] x"))
+
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))
         self.assertTrue(is_backlog_stack({"title": "Ideen"}))

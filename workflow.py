@@ -133,6 +133,101 @@ def friendly_label_title(canonical_key: str) -> str:
     return entry[0] if entry else str(canonical_key)
 
 
+# ---------------------------------------------------------------------------
+# Task-Contract-Template (Description-Vorlage) + Format-Prüfung.
+# Wird genutzt, um (a) neue Karten im richtigen Format zu garantieren und
+# (b) eine Referenz-Vorlagenkarte im Backlog zu pflegen. Die Abschnitte sind
+# Konvention (nicht technisch geparst) — nur die Markdown-Checkboxen werden
+# als Subtasks ausgewertet.
+# ---------------------------------------------------------------------------
+TEMPLATE_CARD_TITLE = "Vorlage (Template)"
+
+TEMPLATE_DESCRIPTION = """# Objective
+
+_Beschreibe hier in 1-2 Sätzen das Ziel der Aufgabe._
+
+# Context
+
+_Hintergrund, betroffene Systeme, relevante Informationen._
+
+# Acceptance Criteria
+
+- [ ] Kriterium 1 erfüllt
+- [ ] Kriterium 2 erfüllt
+
+# Plan
+
+## Subtasks
+
+- [ ] 1. Erster Arbeitsschritt
+- [ ] 2. Zweiter Arbeitsschritt
+
+# Constraints
+
+- Einschränkung / nicht erlaubte Änderungen
+
+# Verification
+
+_Wie wird die Umsetzung verifiziert?_
+
+# Result
+
+_pending_
+"""
+
+# Abschnitte, die eine valide Karte enthalten sollte. Werden als lockere
+# Format-Prüfung genutzt (eine Karte gilt als "im Format", wenn mindestens
+# die Kernabschnitte vorhanden sind). Sprachneutral & tolerant.
+TEMPLATE_REQUIRED_SECTIONS = (
+    "objective",
+    "acceptance criteria",
+    "plan",
+)
+
+# Markierungen, an denen eine leere/unausgefüllte Karte erkannt wird.
+_TEMPLATE_PLACEHOLDER_MARKERS = (
+    "_beschreibe hier",
+    "_pending_",
+    "_hintergrund",
+    "_wie wird",
+    "_einschränkung",
+    "kriterium 1",
+    "erster arbeitsschritt",
+)
+
+
+def description_matches_template(description: str) -> bool:
+    """Prüft, ob eine Description das Task-Contract-Format (grob) erfüllt.
+
+    Kriterien:
+    - enthält mindestens die Kernabschnitte (# Objective, # Acceptance Criteria, # Plan)
+    - enthält mindestens eine Markdown-Checkbox (Subtasks/Acceptance)
+    - enthält keine unausgefüllten Platzhalter (rohe Vorlage)
+
+    Rückgabe True = Format OK, False = muss (vom Adapter) korrigiert werden.
+    """
+    text = (description or "").strip()
+    if not text:
+        return False
+
+    lower = text.lower()
+    # Kernabschnitte müssen vorhanden sein (Überschrift # oder ##).
+    for section in TEMPLATE_REQUIRED_SECTIONS:
+        if f"# {section}" not in lower and f"## {section}" not in lower:
+            return False
+
+    # Mindestens eine Checkbox als Subtask/Acceptance-Kriterium.
+    if not _CHECKBOX_PATTERN.search(text):
+        return False
+
+    # Keine unausgefüllten Platzhalter aus der Roh-Vorlage.
+    for marker in _TEMPLATE_PLACEHOLDER_MARKERS:
+        if marker in lower:
+            return False
+
+    return True
+
+
 def workflow_label_keys(label_titles: List[str]) -> Set[str]:
     """Filtert die Workflow-relevanten kanonischen Keys aus Label-Titeln.
 

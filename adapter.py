@@ -26,6 +26,9 @@ try:
         configure_friendly_labels,
         friendly_label_title,
         has_workflow_label_change,
+        TEMPLATE_CARD_TITLE,
+        TEMPLATE_DESCRIPTION,
+        description_matches_template,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -57,6 +60,9 @@ except ImportError:  # direct test/import
         configure_friendly_labels,
         friendly_label_title,
         has_workflow_label_change,
+        TEMPLATE_CARD_TITLE,
+        TEMPLATE_DESCRIPTION,
+        description_matches_template,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -1288,11 +1294,95 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             if config is None:
                 continue
             stacks = await self.client.get_stacks(board_id)
+            # Vorlagen-/Format-Sicherung im Backlog (pro Board, pro Poll-Zyklus)
+            await self._ensure_backlog_template(board_id, board, stacks)
             for stack in stacks:
                 for card in stack.get("cards") or []:
                     await self._process_card(board, stack, card)
                     processed += 1
         return processed
+
+    async def _ensure_backlog_template(
+        self,
+        board_id: str,
+        board: Dict[str, Any],
+        stacks: List[Dict[str, Any]],
+    ) -> None:
+        """Sichert die Referenz-Vorlagenkarte im Backlog und prüft Backlog-Format.
+
+        Zwei Aufgaben (deterministisch, kein LLM beteiligt):
+
+        1. **Vorlagenkarte sicherstellen:** Existiert im Backlog keine Karte
+           mit dem Titel ``TEMPLATE_CARD_TITLE``, wird eine mit der
+           Template-Description angelegt. Der Mensch kann sie duplizieren —
+           dupliziert er sie (Titel geändert), legt der nächste Poll wieder
+           eine frische Vorlage an, da die alte "verbraucht" wurde.
+
+        2. **Format-Prüfung aller Backlog-Karten:** Karten im Backlog, deren
+           Description NICHT dem Task-Contract entspricht, bekommen das
+           Template-Skelett — so ist sichergestellt, dass jede Backlog-Karte
+           im richtigen Format liegt, bevor sie in den Workflow gezogen wird.
+        """
+        try:
+            backlog_stacks = [
+                s for s in stacks
+                if is_backlog_stack(s, self._configured_board(board_id))
+            ]
+            if not backlog_stacks:
+                return
+
+            backlog_stack = backlog_stacks[0]
+            backlog_stack_id = str(backlog_stack.get("id") or "").strip()
+            cards = backlog_stack.get("cards") or []
+
+            # 1. Vorlagenkarte prüfen/anlegen
+            template_exists = any(
+                str(c.get("title") or "").strip().lower() == TEMPLATE_CARD_TITLE.lower()
+                for c in cards
+            )
+            if not template_exists:
+                try:
+                    created = await self.client.create_card(
+                        board_id,
+                        backlog_stack_id,
+                        title=TEMPLATE_CARD_TITLE,
+                        description=TEMPLATE_DESCRIPTION,
+                        order=0,
+                    )
+                    if created and created.get("id"):
+                        logger.info(
+                            "Deck: Vorlagenkarte '%s' im Backlog von Board %s angelegt.",
+                            TEMPLATE_CARD_TITLE, board_id,
+                        )
+                    else:
+                        logger.warning("Deck: Vorlagenkarte konnte nicht angelegt werden (Board %s).", board_id)
+                except NextcloudDeckError as exc:
+                    logger.warning("Deck: Vorlagenkarte anlegen fehlgeschlagen (Board %s): %s", board_id, exc)
+
+            # 2. Format-Prüfung aller Backlog-Karten (außer der Vorlage selbst)
+            for card in cards:
+                title = str(card.get("title") or "").strip()
+                if title.lower() == TEMPLATE_CARD_TITLE.lower():
+                    continue
+                description = str(card.get("description") or "")
+                if description_matches_template(description):
+                    continue
+                card_id = str(card.get("id") or "").strip()
+                if not card_id:
+                    continue
+                # Karte im Backlog entspricht nicht dem Format → Skelett setzen.
+                try:
+                    await self.client.update_card(
+                        board_id, backlog_stack_id, card_id, description=TEMPLATE_DESCRIPTION
+                    )
+                    logger.info(
+                        "Deck: Backlog-Karte %s ('%s') entsprach nicht dem Format — Template gesetzt.",
+                        card_id, title,
+                    )
+                except NextcloudDeckError as exc:
+                    logger.warning("Deck: Format-Fix für Karte %s fehlgeschlagen: %s", card_id, exc)
+        except Exception as exc:
+            logger.warning("Deck: Backlog-Template-Sicherung fehlgeschlagen (Board %s): %s", board_id, exc)
 
     async def _polling_loop(self) -> None:
         while not self._stop_event.is_set():
