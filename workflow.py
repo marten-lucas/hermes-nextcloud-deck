@@ -40,6 +40,10 @@ FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = dict(_DEFAULT_FRIENDLY_LABELS)
 # Aliase: normalisierter Titel -> kanonischer Key ("phase:plan" etc.)
 LABEL_ALIASES: Dict[str, str] = {}
 
+# Signatur des zuletzt angewendeten label_mapping (Idempotenz-Schutz, siehe
+# configure_friendly_labels). None = noch nie angewendet / leeres Mapping.
+_last_label_mapping_signature: Optional[str] = None
+
 
 def _rebuild_aliases() -> None:
     """Baut LABEL_ALIASES aus dem aktiven FRIENDLY_LABELS neu auf."""
@@ -77,9 +81,23 @@ def configure_friendly_labels(mapping_config: Any) -> None:
     Alternativ auch kompakt: {"phase:plan": ["\U0001F4A1 Planung", "FAD7A0"], ...}
     Unvollst\u00E4ndige/ung\u00FCltige Eintr\u00E4ge werden ignoriert; das Default-Mapping
     bleibt f\u00FCr nicht genannte Keys bestehen.
+
+    Idempotent: Das Mapping wird nur dann neu angewendet (und geloggt), wenn es
+    sich gegen\u00FCber dem letzten Aufruf tats\u00E4chlich ge\u00E4ndert hat. Das Gateway ruft
+    die Config-Validierung sehr h\u00E4ufig auf (Status-/Dashboard-Polls); ohne diese
+    Kurzschluss-Pr\u00FCfung w\u00FCrde hier bei jedem Poll globaler Status neu gesetzt
+    und Log-Spam erzeugt.
     """
+    global _last_label_mapping_signature
+
     if not isinstance(mapping_config, dict) or not mapping_config:
+        _last_label_mapping_signature = None
         return
+
+    signature = repr(sorted(mapping_config.items(), key=lambda kv: str(kv[0])))
+    if signature == _last_label_mapping_signature:
+        return
+
     new_mapping: Dict[str, Tuple[str, str]] = dict(FRIENDLY_LABELS)
     for key, entry in mapping_config.items():
         canonical = str(key or "").strip().lower()
@@ -102,6 +120,7 @@ def configure_friendly_labels(mapping_config: Any) -> None:
     FRIENDLY_LABELS.clear()
     FRIENDLY_LABELS.update(new_mapping)
     _rebuild_aliases()
+    _last_label_mapping_signature = signature
     logger.info("Deck: Friendly-Label-Mapping aus Config geladen (%d Eintr\u00E4ge).", len(FRIENDLY_LABELS))
 
 
