@@ -742,11 +742,42 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
 
     async def _update_card_description(self, card_id: str, description: str) -> bool:
-        """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards)."""
+        """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards).
+
+        Absicherung gegen abgeschnittene Agent-Ausgaben (z. B. durch einen
+        Gateway-Restart mitten im Turn): Ist die neue Description ein bloßes
+        Präfix/Fragment der bestehenden (die bestehende beginnt mit dem neuen
+        Text), wird die bestehende BEHALTEN und der unvollständige Text
+        verworfen — sonst würde der Datenverlust den vollständigen Inhalt
+        zerstören. Nur eine substantiell andere/längere Description wird
+        übernommen.
+        """
         location = await self._locate_card(card_id)
         if location is None:
             return False
         board_id, stack_id = location
+
+        new_text = (description or "").strip()
+
+        # Bestehende Description laden, um Truncation zu erkennen.
+        try:
+            current_card = await self.client.get_card(board_id, stack_id, card_id)
+            existing = str((current_card or {}).get("description") or "").strip()
+        except NextcloudDeckError:
+            existing = ""
+
+        if existing:
+            existing_head = existing[:max(1, len(new_text))]
+            # Truncation-Evidenz: neuer Text ist deutlich kürzer UND die
+            # bestehende Description beginnt mit dem neuen Text (Präfix). Dann
+            # ist der Agent mitten im Schreiben abgebrochen → nichts überschreiben.
+            if new_text and len(new_text) < len(existing) and existing_head == new_text:
+                logger.warning(
+                    "Deck: Description-Update für Karte %s verworfen — neuer Text ist ein abgeschnittenes Präfix der bestehenden Description (Truncation-Verdacht, z. B. Gateway-Restart).",
+                    card_id,
+                )
+                return False
+
         try:
             result = await self.client.update_card(board_id, stack_id, card_id, description=description)
             return result is not None

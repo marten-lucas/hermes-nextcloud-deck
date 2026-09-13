@@ -48,6 +48,12 @@ Status, Labels und Assignee. Die `card_id` steht im Kontext (`Karten-ID (card_id
 
 Wichtige Ablaufregeln:
 
+- **Description nur VOLLSTÄNDIG senden:** Das Feld `description` in
+  `deck_card_action` **ersetzt** den kompletten Karteninhalt. Sende es NUR,
+  wenn du den vollständigen Markdown (alle Abschnitte: Objective, Acceptance
+  Criteria, Plan/Subtasks, Result) fertig hast. Willst du nur Status/Labels/
+  Assignee ändern, **lasse `description` weg** — ein unvollständiger
+  Description-Text zerstört den bestehenden Inhalt.
 - **Plan fertig:** `deck_card_action` mit `description` (Plan inkl. Subtasks),
   `target_status: "review"` und `assign_labels: ["hermes/approval:required"]`.
   Die Karte bleibt in `hermes/phase:plan`, bis ein Mensch freigibt.
@@ -55,7 +61,7 @@ Wichtige Ablaufregeln:
   `remove_labels: ["hermes/phase:plan"]` + `assign_labels: ["hermes/phase:execute"]`.
   So ist der Phasenwechsel auch im Deck-UI sichtbar.
 - **Subtask abgehakt:** `deck_card_action` mit aktualisierter `description`
-  (Checkbox auf `[x]`, ggf. `Evidence: ...`-Zeile).
+  (Checkbox auf `[x]`, ggf. `Evidence: ...`-Zeile) — wieder VOLLSTÄNDIG.
 - **Abnahme übergeben:** `deck_card_action` mit `target_status: "review"`
   (niemals `done` — Gate 2) + `assign_labels: ["hermes/approval:required"]`.
 - **Plan-Mismatch:** `target_status: "blocked"` + `comment: "🤖 PLAN CHANGE REQUESTED"`.
