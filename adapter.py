@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -131,6 +132,12 @@ logger = logging.getLogger(__name__)
 # Der Handler läuft im Tool-Worker-Thread, muss aber auf die Adapter-Instanz
 # zugreifen, die auf dem Gateway-Loop lebt. Wird im __init__ gesetzt.
 _LIVE_ADAPTER_REF: Optional["NextcloudDeckPlatform"] = None
+
+# Ruhe-Schwelle (Sekunden) für die Backlog-Format-Korrektur: Karten, deren
+# ``lastModified`` jünger als dieser Wert ist, werden als "aktiv bearbeitet"
+# betrachtet und NICHT angefasst — so wird eine laufende menschliche
+# Bearbeitung nicht durch eine automatische Template-Ergänzung gestört.
+BACKLOG_FORMAT_QUIET_SECONDS = 300.0
 
 
 @dataclass
@@ -1362,11 +1369,26 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     logger.warning("Deck: Vorlagenkarte anlegen fehlgeschlagen (Board %s): %s", board_id, exc)
 
             # 2. Format-Prüfung aller Backlog-Karten (außer der Vorlage selbst)
+            now = time.time()
             for card in cards:
                 title = str(card.get("title") or "").strip()
                 if title.lower() == TEMPLATE_CARD_TITLE.lower():
                     continue
                 description = str(card.get("description") or "")
+
+                # Aktiv bearbeitete Karten NICHT anfassen: wurde die Karte erst
+                # kürzlich (innerhalb der Ruhe-Schwelle) geändert, wird davon
+                # ausgegangen, dass gerade ein Mensch sie bearbeitet. Eine
+                # Format-Korrektur würde den laufenden Schreibvorgang stören.
+                last_modified = card.get("lastModified")
+                if isinstance(last_modified, (int, float)) and last_modified > 0:
+                    age_seconds = now - last_modified
+                    if age_seconds < BACKLOG_FORMAT_QUIET_SECONDS:
+                        logger.debug(
+                            "Deck: Backlog-Karte %s ('%s') wurde vor %.0fs geändert — Format-Korrektur übersprungen (aktiv bearbeitet).",
+                            card.get("id"), title, age_seconds,
+                        )
+                        continue
 
                 # Nur FEHLENDE Kernabschnitte ermitteln — der vorhandene,
                 # menschengeschriebene Text bleibt unangetastet.
