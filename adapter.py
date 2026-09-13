@@ -1131,7 +1131,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         headers = self.identity.principal_headers(principal) or {
             "X-On-Behalf-Of": actor_id,
-            "X-User-Groups": ",".join(groups),
+            "X-User-Groups": ",".join(str(g).strip().lower() for g in groups),
         }
         # extra_headers plattformneutral transportieren:
         # - dict-Sources (Test-Fallback-Base) → Key-Setzung

@@ -24,36 +24,29 @@ from state import DeckCardSnapshot, DeckStateManager
 
 
 class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
-    async def test_identity_resolver_bot_author_uses_fallback(self):
-        original = os.environ.get("MCP_IDENTITY_FALLBACK_USER")
-        try:
-            os.environ["MCP_IDENTITY_FALLBACK_USER"] = "cronjob-user"
-            resolver = DeckIdentityResolver(bot_user_id="hermes")
-            card = {"assignedUsers": [{"uid": "hermes"}]}
-            actor, groups, is_fallback = await resolver.resolve_card_actor(card, comment_author="hermes")
-            # Bot als letzter Autor → Fallback-User statt Bot selbst (X-On-Behalf-Semantik)
-            self.assertEqual(actor, "cronjob-user")
-            self.assertEqual(groups, [])
-            self.assertTrue(is_fallback)
-        finally:
-            if original is None:
-                os.environ.pop("MCP_IDENTITY_FALLBACK_USER", None)
-            else:
-                os.environ["MCP_IDENTITY_FALLBACK_USER"] = original
-
-    async def test_identity_resolver_comment_author(self):
+    async def test_identity_resolver_always_uses_bot_user(self):
+        """Deck agiert IMMER als konfigurierter Bot-User (hermes_user_id),
+        unabhängig vom letzten Kommentar-Autor."""
         resolver = DeckIdentityResolver(bot_user_id="hermes")
-        card = {"assignedUsers": [{"uid": "bob"}]}
-        actor, _, is_fallback = await resolver.resolve_card_actor(card, comment_author="alice")
-        self.assertEqual(actor, "alice")
+        card = {"assignedUsers": [{"uid": "hermes"}]}
+        actor, groups, is_fallback = await resolver.resolve_card_actor(card, comment_author="hermes")
+        self.assertEqual(actor, "hermes")
         self.assertFalse(is_fallback)
-
-    async def test_identity_resolver_bot_alias_uses_fallback(self):
+    
+    async def test_identity_resolver_ignores_comment_author(self):
+        """Auch wenn ein Mensch (alice) kommentiert, bleibt der Actor der Bot-User."""
+        resolver = DeckIdentityResolver(bot_user_id="hermes")
+        card = {"assignedUsers": [{"uid": "hermes"}]}
+        actor, _, is_fallback = await resolver.resolve_card_actor(card, comment_author="alice")
+        self.assertEqual(actor, "hermes")
+        self.assertFalse(is_fallback)
+    
+    async def test_identity_resolver_bot_alias_still_bot_user(self):
         resolver = DeckIdentityResolver(bot_user_id="hermes", bot_aliases=["ki_assistent"])
         card = {"assignedUsers": []}
         actor, _, is_fallback = await resolver.resolve_card_actor(card, comment_author="KI_Assistent")
-        self.assertTrue(is_fallback)
-        self.assertNotEqual(actor, "ki_assistent")
+        self.assertEqual(actor, "hermes")
+        self.assertFalse(is_fallback)
 
     def test_fallback_actor_builds_system_principal(self):
         principal = DeckIdentityResolver.build_principal(

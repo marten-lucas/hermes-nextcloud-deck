@@ -114,7 +114,7 @@ class DeckIdentityResolver:
 
     async def get_user_groups(self, user_id: str) -> Set[str]:
         """Ruft Nextcloud-Gruppen des Users ab (Provisioning API v1, TTL-Cache, graceful fallback)."""
-        if not user_id or user_id == self.bot_user_id or self.client is None:
+        if not user_id or self.client is None:
             return set()
 
         now = time.time()
@@ -126,6 +126,11 @@ class DeckIdentityResolver:
         try:
             if hasattr(self.client, "cloud_ocs_get"):
                 data = await self.client.cloud_ocs_get(f"users/{user_id}/groups")
+                # cloud_ocs_get liefert das VOLLE OCS-Envelope
+                # ({"ocs":{"meta":...,"data":{"groups":[...]}}}), anders als
+                # ocs_get (das body["ocs"]["data"] zurückgibt). Zuerst entpacken.
+                if isinstance(data, dict) and "ocs" in data:
+                    data = data.get("ocs", {}).get("data", {})
                 groups_list = (
                     data.get("groups", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
                 )
@@ -155,27 +160,18 @@ class DeckIdentityResolver:
     ) -> Tuple[str, List[str], bool]:
         """Ermittelt den Actor im Namen dessen Hermes handelt.
 
-        Priorität: Kommentar-Autor (echter Mensch) → Fallback-User.
-        Ist der Bot selbst letzter Autor, wird der Fallback-User verwendet,
-        damit Hermes nie "als sich selbst" handelt.
+        Deck agiert IMMER als der konfigurierte Nextcloud-Bot-User
+        (hermes_user_id, z. B. ki_assistent) — unabhängig vom letzten
+        Kommentar-Autor. Die Karte ist diesem User zugeordnet; dessen
+        Nextcloud-Gruppen bestimmen die RBAC-Sicht im AgentGateway
+        (it-admin → volle Tool-Auswahl).
 
-        Returns (actor_id, groups, is_fallback): is_fallback=True markiert
-        System-/Fallback-Actors — diese werden zu kind=system-Principals
-        (niemals Personal-/Team-Memory).
+        Returns (actor_id, groups, is_fallback): is_fallback ist immer False —
+        der Bot-User wird als regulärer (interactive) Principal behandelt.
         """
-        fallback = (
-            os.getenv("MCP_IDENTITY_FALLBACK_USER", "").strip()
-            or os.getenv("NEXTCLOUD_DECK_USERNAME", "").strip()
-            or "system"
-        )
-
-        author = str(comment_author).strip() if comment_author else ""
-        bot_ids = {self.bot_user_id.lower(), *self.bot_aliases}
-        if not author or author.lower() in bot_ids:
-            return fallback, [], True
-
-        groups = await self.get_user_groups(author)
-        return author, sorted(groups), False
+        actor = self.bot_user_id
+        groups = await self.get_user_groups(actor)
+        return actor, sorted(str(g) for g in groups), False
 
     @staticmethod
     def build_principal(
