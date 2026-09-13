@@ -136,6 +136,63 @@ Every outgoing message is categorized before it is written as a Deck comment
 Card actions via `metadata` bypass the filter — they are structural operations,
 not chat messages (see [Workflow model](#workflow-model-v5) below).
 
+## How to use it (human workflow)
+
+### Board columns
+
+The board uses generic lifecycle columns (no per-phase columns — the *semantic*
+phase lives in labels):
+
+| Column | Meaning |
+| --- | --- |
+| **Backlog** | Idea collection. The agent **ignores** cards here — it is the "on/off" switch. Write and refine the card description freely; nothing runs until you move it out. |
+| **Triage** | "Pick it up and look at it" — the agent does a rough pass and classifies (type/risk). Optional. |
+| **Todo** | Accepted for work, waiting to start. |
+| **Ready** | Context prepared, ready for an agent run. Functionally treated like `Running`. |
+| **Running** | The agent actively works here (plan phase, then optionally execute phase). |
+| **Review** | The agent is done (or the plan awaits approval) — **waits for a human**. |
+| **Blocked** | Semantic hold (reason in a comment). Reachable from any phase. |
+| **Done** | Only after human acceptance (the agent can never set this — Gate 2). |
+
+### Labels (tags) and what they do
+
+These are **namespaced labels** (`hermes/*`). You set `type` and `risk` **yourself**
+before starting; the agent sets `phase` and `approval` as it works.
+
+| Label | Who sets it | Effect |
+| --- | --- | --- |
+| `hermes/type:documentation` | human | Documentation/writing task — read-only by default. |
+| `hermes/type:research` | human | Investigation/research task — read-only by default. |
+| `hermes/type:troubleshooting` | human | Diagnose a problem — read-only; a fix requires your approval. |
+| `hermes/type:implementation` | human | A system **change** — always requires approval before executing (Gate 1). |
+| `hermes/risk:low` | human | Low risk → progressive autonomy (no mandatory gate). |
+| `hermes/risk:medium` | human | Forces Gate 1 approval before execute. |
+| `hermes/risk:high` | human | Forces Gate 1 approval **and** blocks destructive tool calls until you approve (Gate 3). |
+| `hermes/phase:plan` | agent | Read-only conception: the agent writes Objective/Plan/Subtasks, makes no production changes. |
+| `hermes/phase:execute` | agent | Execute the approved plan, check off subtasks with evidence. |
+| `hermes/approval:required` | agent | The plan waits for your approval. |
+| `hermes/approval:approved` | human | You approve the plan — the agent may move to `execute`. |
+
+### The flow, step by step
+
+1. **Backlog** — write the card description (objective, what you want). The agent does nothing here.
+2. **Set `type` and `risk`** labels (your risk assessment — the agent does **not** guess these).
+3. **Move to `Todo`** (or `Triage`) — this is the start trigger.
+4. The agent works in `Running` (plan → optionally execute).
+5. When done, the agent moves the card to **`Review`** (and sets `hermes/approval:required`) — it never moves to `Done` (Gate 2).
+6. **You review** the result and move it to **`Done`**.
+
+### Risk & type — how the flow differs
+
+- **`risk:low` + `documentation`/`research`/`troubleshooting`** → **no mandatory gate**. The agent may go from `plan` to `execute` autonomously. Example: *"Write the current time into a Collective page"* — it just runs and reports.
+- **`type:implementation`** (any risk) or **`risk:medium`/`high`** (any type) → **Gate 1 is mandatory**. The agent must produce a plan first, move to `Review`, and wait for `hermes/approval:approved` before it may touch anything.
+- **`risk:high`** additionally enables **Gate 3**: destructive tool calls (`delete`, `restart`, `reset`, auth changes, …) are *technically blocked* until you explicitly approve in a comment — regardless of type.
+
+Practically for a "write a page" task: set `hermes/type:documentation` + `hermes/risk:low`
+and the whole run completes without waiting. For anything that *changes systems*,
+use `hermes/type:implementation` (and a matching `risk`) so the approval gate
+protects you.
+
 ## Workflow model (v5)
 
 The adapter implements the agentic Kanban workflow described in
