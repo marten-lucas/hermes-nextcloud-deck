@@ -191,8 +191,8 @@ _TEMPLATE_PLACEHOLDER_MARKERS = (
     "_hintergrund",
     "_wie wird",
     "_einschränkung",
-    "kriterium 1",
-    "erster arbeitsschritt",
+    "kriterium ",
+    "arbeitsschritt",
 )
 
 
@@ -206,26 +206,89 @@ def description_matches_template(description: str) -> bool:
 
     Rückgabe True = Format OK, False = muss (vom Adapter) korrigiert werden.
     """
+    return not missing_template_sections(description) and bool(_CHECKBOX_PATTERN.search((description or "").strip())) and not any(m in (description or "").lower() for m in _TEMPLATE_PLACEHOLDER_MARKERS)
+
+
+def _section_title(key: str) -> str:
+    """Menschlicher Anzeige-Titel eines Template-Abschnitts (z. B. 'acceptance criteria')."""
+    return key.strip().lstrip("#").strip()
+
+
+def _present_section_keys(description: str) -> Set[str]:
+    """Ermittelt die in einer Description vorhandenen Kernabschnitt-Keys (lowercase)."""
+    text = (description or "").lower()
+    present: Set[str] = set()
+    for section in TEMPLATE_REQUIRED_SECTIONS:
+        if f"# {section}" in text or f"## {section}" in text:
+            present.add(section)
+    return present
+
+
+def _template_section_blocks() -> Dict[str, str]:
+    """Zerlegt TEMPLATE_DESCRIPTION in Abschnittsblöcke (Key -> Markdown-Block).
+
+    Jeder Block beginnt bei der '#<name>'-Überschrift und endet vor der
+    nächsten Überschrift. Der Block wird NIE mit einem Platzhalter-Inhalt
+    ('_Beschreibe hier…' etc.) angehängt — fehlende Abschnitte werden als
+    leere Gerüst-Blöcke (nur Überschrift + ggf. leere Subtasks-Zeile) ergänzt.
+    """
+    blocks: Dict[str, str] = {}
+    lines = TEMPLATE_DESCRIPTION.splitlines()
+    current_key: Optional[str] = None
+    current_lines: List[str] = []
+    for line in lines:
+        # Nur h1-Überschriften ('# ') trennen Abschnitte; h2 ('## Subtasks')
+        # gehört zum übergeordneten Abschnitt (Markdown-Hierarchie).
+        if line.startswith("# ") and not line.startswith("## "):
+            if current_key is not None:
+                blocks[current_key] = "\n".join(current_lines).rstrip()
+            current_key = line[2:].strip().lower()
+            current_lines = [line]
+        else:
+            if current_key is not None:
+                current_lines.append(line)
+    if current_key is not None:
+        blocks[current_key] = "\n".join(current_lines).rstrip()
+    return blocks
+
+
+def missing_template_sections(description: str) -> List[str]:
+    """Gibt die Markdown-Blöcke der fehlenden Kernabschnitte zurück.
+
+    Es wird ausschließlich geprüft, ob die Kernabschnitte (# Objective,
+    # Acceptance Criteria, # Plan) als Überschriften vorhanden sind. Fehlende
+    Abschnitte werden als leeres Gerüst (Überschrift + leere Checkbox) geliefert,
+    damit sie UNTEN an die bestehende Description angehängt werden können —
+    der vorhandene, vom Menschen verfasste Inhalt bleibt unangetastet.
+    """
     text = (description or "").strip()
     if not text:
-        return False
+        return []
 
-    lower = text.lower()
-    # Kernabschnitte müssen vorhanden sein (Überschrift # oder ##).
+    present = _present_section_keys(text)
+    template_blocks = _template_section_blocks()
+
+    missing: List[str] = []
     for section in TEMPLATE_REQUIRED_SECTIONS:
-        if f"# {section}" not in lower and f"## {section}" not in lower:
-            return False
+        if section in present:
+            continue
+        block = template_blocks.get(section)
+        if not block:
+            continue
+        # Platzhalter-Zeilen (_Beschreibe…, Kriterium 1 …, Erster Arbeitsschritt …)
+        # entfernen — der Mensch bekommt ein neutrales Gerüst, keine Roh-Vorlage.
+        cleaned: List[str] = []
+        for line in block.splitlines():
+            low = line.strip().lower()
+            if any(m in low for m in _TEMPLATE_PLACEHOLDER_MARKERS):
+                continue
+            cleaned.append(line)
+        # Überschrift immer behalten (erste Zeile ist der '# <section>'-Header).
+        header = cleaned[0] if cleaned else f"# {_section_title(section)}"
+        body = cleaned[1:] if len(cleaned) > 1 else []
+        missing.append("\n".join([header, *body]).rstrip())
 
-    # Mindestens eine Checkbox als Subtask/Acceptance-Kriterium.
-    if not _CHECKBOX_PATTERN.search(text):
-        return False
-
-    # Keine unausgefüllten Platzhalter aus der Roh-Vorlage.
-    for marker in _TEMPLATE_PLACEHOLDER_MARKERS:
-        if marker in lower:
-            return False
-
-    return True
+    return missing
 
 
 def workflow_label_keys(label_titles: List[str]) -> Set[str]:

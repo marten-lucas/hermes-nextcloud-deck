@@ -29,6 +29,7 @@ try:
         TEMPLATE_CARD_TITLE,
         TEMPLATE_DESCRIPTION,
         description_matches_template,
+        missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -63,6 +64,7 @@ except ImportError:  # direct test/import
         TEMPLATE_CARD_TITLE,
         TEMPLATE_DESCRIPTION,
         description_matches_template,
+        missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -1365,19 +1367,43 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 if title.lower() == TEMPLATE_CARD_TITLE.lower():
                     continue
                 description = str(card.get("description") or "")
-                if description_matches_template(description):
+
+                # Nur FEHLENDE Kernabschnitte ermitteln — der vorhandene,
+                # menschengeschriebene Text bleibt unangetastet.
+                missing = missing_template_sections(description)
+
+                # Zusätzlich: eine völlig leere Description bekommt das komplette
+                # Skelett (hier gibt es nichts zu bewahren); sonst nur ergänzen.
+                if not missing and not description.strip():
+                    missing = [TEMPLATE_DESCRIPTION.strip()]
+
+                if not missing:
                     continue
+
                 card_id = str(card.get("id") or "").strip()
                 if not card_id:
                     continue
-                # Karte im Backlog entspricht nicht dem Format → Skelett setzen.
+
+                # Fehlende Abschnitte UNTEN anhängen (Präfix entfernt Platzhalter).
+                suffix = "\n\n".join(missing)
+                new_description = description.strip()
+                if new_description:
+                    new_description = f"{new_description}\n\n{suffix}"
+                else:
+                    new_description = suffix
+
                 try:
                     await self.client.update_card(
-                        board_id, backlog_stack_id, card_id, description=TEMPLATE_DESCRIPTION
+                        board_id, backlog_stack_id, card_id, description=new_description
                     )
                     logger.info(
-                        "Deck: Backlog-Karte %s ('%s') entsprach nicht dem Format — Template gesetzt.",
-                        card_id, title,
+                        "Deck: Backlog-Karte %s ('%s') — fehlende Abschnitte ergänzt: %s",
+                        card_id,
+                        title,
+                        ", ".join(
+                            m.splitlines()[0].lstrip("#").strip() if m.splitlines() else m
+                            for m in missing
+                        ),
                     )
                 except NextcloudDeckError as exc:
                     logger.warning("Deck: Format-Fix für Karte %s fehlgeschlagen: %s", card_id, exc)
