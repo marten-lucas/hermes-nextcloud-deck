@@ -64,6 +64,7 @@ platforms:
       hermes_user_id: "hermes"
       home_channel: "log"   # optional: Cron-/Cross-Platform-Zustellung ins Logfile statt auf Karte
       poll_interval_seconds: 30
+      backlog_format_quiet_seconds: 300   # optional: siehe unten
       boards:
         - board_id: "7"
 ```
@@ -75,6 +76,14 @@ global `NEXTCLOUD_HOME_CHANNEL` (a Talk room) is **not** reused, so no misleadin
 "no home channel" notice appears. Set it to a Deck card target
 (`deck:board:<id>:card:<id>`) to receive cron/cross-platform messages on a card,
 or to `"log"` to route them to `~/.hermes/logs/deck-home.log` instead.
+
+`backlog_format_quiet_seconds` is optional (default `300`). It controls the
+Backlog format correction: cards whose `lastModified` is more recent than this
+value are treated as *actively edited* and are **not** touched, so an in-progress
+human edit is never interrupted by an automatic template fix. Set it to `0` to
+disable the quiet window entirely (idle and recently-edited cards are always
+corrected). The value can also be set via the environment variable
+`NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS`.
 
 ## Diagnostics
 

@@ -151,6 +151,7 @@ class DeckRuntimeConfig:
     home_channel: Optional[str] = None
     bot_aliases: tuple[str, ...] = ()
     destructive_tool_patterns: List[str] = None  # type: ignore[assignment]
+    backlog_format_quiet_seconds: float = BACKLOG_FORMAT_QUIET_SECONDS
 
 
 def _load_dotenv_fallback() -> Dict[str, str]:
@@ -237,6 +238,24 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     except (TypeError, ValueError):
         poll = 30.0
 
+    # Ruhe-Schwelle für die Backlog-Format-Korrektur: Karten, deren
+    # ``lastModified`` jünger als dieser Wert ist, gelten als "aktiv bearbeitet"
+    # und werden NICHT angefasst. ``0`` deaktiviert die Prüfung komplett
+    # (immer korrigieren, keine Wartezeit). Negativ-Werte werden wie 0 behandelt.
+    try:
+        backlog_format_quiet_seconds = float(
+            extra.get("backlog_format_quiet_seconds")
+            or _env(
+                "NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS",
+                "NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS",
+            )
+            or BACKLOG_FORMAT_QUIET_SECONDS
+        )
+    except (TypeError, ValueError):
+        backlog_format_quiet_seconds = BACKLOG_FORMAT_QUIET_SECONDS
+    if backlog_format_quiet_seconds < 0:
+        backlog_format_quiet_seconds = 0.0
+
     boards: Dict[str, Dict[str, Any]] = {}
     raw_boards = extra.get("boards") or []
     if isinstance(raw_boards, list):
@@ -300,6 +319,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         home_channel=home_channel,
         bot_aliases=bot_aliases,
         destructive_tool_patterns=destructive_patterns,
+        backlog_format_quiet_seconds=backlog_format_quiet_seconds,
     )
 
 
@@ -1370,25 +1390,27 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
             # 2. Format-Prüfung aller Backlog-Karten (außer der Vorlage selbst)
             now = time.time()
+            quiet = self.runtime.backlog_format_quiet_seconds
             for card in cards:
                 title = str(card.get("title") or "").strip()
                 if title.lower() == TEMPLATE_CARD_TITLE.lower():
                     continue
                 description = str(card.get("description") or "")
 
-                # Aktiv bearbeitete Karten NICHT anfassen: wurde die Karte erst
-                # kürzlich (innerhalb der Ruhe-Schwelle) geändert, wird davon
-                # ausgegangen, dass gerade ein Mensch sie bearbeitet. Eine
-                # Format-Korrektur würde den laufenden Schreibvorgang stören.
-                last_modified = card.get("lastModified")
-                if isinstance(last_modified, (int, float)) and last_modified > 0:
-                    age_seconds = now - last_modified
-                    if age_seconds < BACKLOG_FORMAT_QUIET_SECONDS:
-                        logger.debug(
-                            "Deck: Backlog-Karte %s ('%s') wurde vor %.0fs geändert — Format-Korrektur übersprungen (aktiv bearbeitet).",
-                            card.get("id"), title, age_seconds,
-                        )
-                        continue
+                # Aktiv bearbeitete Karten NICHT anfassen (nur wenn die
+                # Ruhe-Schwelle > 0 ist): wurde die Karte erst kürzlich
+                # geändert, wird von einer laufenden menschlichen Bearbeitung
+                # ausgegangen. quiet_seconds == 0 deaktiviert diese Prüfung.
+                if quiet > 0:
+                    last_modified = card.get("lastModified")
+                    if isinstance(last_modified, (int, float)) and last_modified > 0:
+                        age_seconds = now - last_modified
+                        if age_seconds < quiet:
+                            logger.debug(
+                                "Deck: Backlog-Karte %s ('%s') wurde vor %.0fs geändert — Format-Korrektur übersprungen (aktiv bearbeitet).",
+                                card.get("id"), title, age_seconds,
+                            )
+                            continue
 
                 # Nur FEHLENDE Kernabschnitte ermitteln — der vorhandene,
                 # menschengeschriebene Text bleibt unangetastet.

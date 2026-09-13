@@ -33,3 +33,7 @@ optional_env:
     description: "Polling interval in seconds (minimum 5)"
     prompt: "Polling interval"
     password: false
+  - name: NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS
+    description: "Quiet window (seconds) for Backlog format correction; 0 disables (default 300)"
+    prompt: "Backlog format quiet window"
+    password: false
