@@ -152,6 +152,7 @@ class DeckRuntimeConfig:
     bot_aliases: tuple[str, ...] = ()
     destructive_tool_patterns: List[str] = None  # type: ignore[assignment]
     backlog_format_quiet_seconds: float = BACKLOG_FORMAT_QUIET_SECONDS
+    max_in_progress: int = 0
 
 
 def _load_dotenv_fallback() -> Dict[str, str]:
@@ -256,6 +257,21 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     if backlog_format_quiet_seconds < 0:
         backlog_format_quiet_seconds = 0.0
 
+    # WIP-Limit: maximale Anzahl gleichzeitig "in Arbeit" befindlicher Karten
+    # (todo/ready/running). ``0`` = kein Limit (Default). ``1`` erzwingt
+    # strikt sequenzielle Abarbeitung — der Agent startet keine neue Karte,
+    # solange eine bereits in einer Arbeits-Spalte liegt (Multitasking-Schutz).
+    try:
+        max_in_progress = int(
+            extra.get("max_in_progress")
+            or _env("NEXTCLOUD_DECK_MAX_IN_PROGRESS", "NEXTCLOUD_DECK_MAX_IN_PROGRESS")
+            or 0
+        )
+    except (TypeError, ValueError):
+        max_in_progress = 0
+    if max_in_progress < 0:
+        max_in_progress = 0
+
     boards: Dict[str, Dict[str, Any]] = {}
     raw_boards = extra.get("boards") or []
     if isinstance(raw_boards, list):
@@ -320,6 +336,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         bot_aliases=bot_aliases,
         destructive_tool_patterns=destructive_patterns,
         backlog_format_quiet_seconds=backlog_format_quiet_seconds,
+        max_in_progress=max_in_progress,
     )
 
 
@@ -1037,6 +1054,33 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
         return self.runtime.boards.get(board_id)
 
+    async def _count_active_cards(self, board_id: str, exclude_card_id: Optional[str] = None) -> int:
+        """Zählt Karten in Arbeits-Spalten (todo/ready/running) eines Boards.
+
+        Wird für das WIP-Limit genutzt: Karten, die der Mensch aktiv in den
+        Workflow gegeben hat (nicht Backlog/Review/Blocked/Done), gelten als
+        "in Arbeit". ``exclude_card_id`` blendet die aktuell betrachtete Karte
+        aus, damit deren eigener Status nicht die Zählung verfälscht.
+        """
+        if not self.runtime.max_in_progress:
+            return 0
+        try:
+            stacks = await self.client.get_stacks(board_id)
+        except NextcloudDeckError:
+            return 0
+        active_titles = {"todo", "ready", "running", "to do", "in progress", "in bearbeitung"}
+        count = 0
+        for stack in stacks or []:
+            title = str(stack.get("title") or "").strip().lower()
+            if title not in active_titles:
+                continue
+            for card in stack.get("cards") or []:
+                cid = str(card.get("id") or "").strip()
+                if exclude_card_id and cid == exclude_card_id:
+                    continue
+                count += 1
+        return count
+
     def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
         assigned = set(self.identity.assigned_uids(card))
         if self.runtime.hermes_user_id in assigned:
@@ -1169,6 +1213,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         if not self.state.should_process(snapshot):
             return
+
+        # WIP-Limit: Ist max_in_progress > 0 und bereits so viele ANDERE Karten
+        # in Arbeits-Spalten (todo/ready/running), wie das Limit erlaubt, wird
+        # diese Karte NICHT gestartet — der nächste Poll-Zyklus prüft erneut,
+        # sobald eine laufende Karte nach Review/Blocked/Done geschoben wurde.
+        if self.runtime.max_in_progress > 0:
+            active = await self._count_active_cards(board_id, exclude_card_id=card_id)
+            if active >= self.runtime.max_in_progress:
+                logger.info(
+                    "Deck: WIP-Limit erreicht (%d >= %d) — Karte %s ('%s') noch nicht gestartet.",
+                    active, self.runtime.max_in_progress, card_id, snapshot.title,
+                )
+                return
 
         actor_id, groups, is_fallback = await self.identity.resolve_card_actor(card, last_author)
 

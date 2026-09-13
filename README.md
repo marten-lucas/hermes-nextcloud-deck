@@ -65,6 +65,7 @@ platforms:
       home_channel: "log"   # optional: Cron-/Cross-Platform-Zustellung ins Logfile statt auf Karte
       poll_interval_seconds: 30
       backlog_format_quiet_seconds: 300   # optional: siehe unten
+      max_in_progress: 1                  # optional: WIP-Limit, 0 = unbegrenzt
       boards:
         - board_id: "7"
 ```
@@ -84,6 +85,14 @@ human edit is never interrupted by an automatic template fix. Set it to `0` to
 disable the quiet window entirely (idle and recently-edited cards are always
 corrected). The value can also be set via the environment variable
 `NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS`.
+
+`max_in_progress` is optional (default `0` = unlimited). It is the
+**work-in-progress limit**: the maximum number of cards that may sit in active
+columns (`Todo`/`Ready`/`Running`) at the same time. When the limit is reached,
+new cards in those columns are **not** started until a running one moves to
+`Review`/`Blocked`/`Done`. Set `1` to force strictly sequential execution so the
+model never multitasks across cards. Also settable via
+`NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
 
 ## Diagnostics
 
@@ -179,6 +188,9 @@ before starting; the agent sets `phase` and `approval` as it works.
 2. **Set `type` and `risk`** labels (your risk assessment — the agent does **not** guess these).
 3. **Move to `Todo`** (or `Triage`) — this is the start trigger.
 4. The agent works in `Running` (plan → optionally execute).
+   - With `max_in_progress` set (e.g. `1`), cards are processed **strictly one
+     at a time** — no model multitasking. New cards in `Todo`/`Ready`/`Running`
+     wait until the active one reaches `Review`/`Blocked`/`Done`.
 5. When done, the agent moves the card to **`Review`** (and sets `hermes/approval:required`) — it never moves to `Done` (Gate 2).
 6. **You review** the result and move it to **`Done`**.
 

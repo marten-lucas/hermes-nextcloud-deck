@@ -37,3 +37,7 @@ optional_env:
     description: "Quiet window (seconds) for Backlog format correction; 0 disables (default 300)"
     prompt: "Backlog format quiet window"
     password: false
+  - name: NEXTCLOUD_DECK_MAX_IN_PROGRESS
+    description: "Max concurrent cards in work (todo/ready/running); 0 = unlimited (default)"
+    prompt: "Work-in-progress limit"
+    password: false
