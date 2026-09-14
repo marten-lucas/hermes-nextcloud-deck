@@ -16,14 +16,6 @@ LABEL_PREFIX_TYPE = "hermes/type:"
 LABEL_PREFIX_RISK = "hermes/risk:"
 LABEL_PREFIX_APPROVAL = "hermes/approval:"
 
-# Status-Label "Waiting": reiner Sichtbarkeits-Indikator (kein Workflow-Gate).
-# Der Adapter setzt es, wenn eine Karte das globale WIP-Limit erreicht hat und
-# noch nicht gestartet werden kann — so ist sichtbar, dass die Karte gesehen
-# wurde, aber auf einen freien Slot wartet. Wird beim tatsächlichen Start
-# wieder entfernt.
-WAITING_LABEL_TITLE = "\u23F3 Waiting"
-WAITING_LABEL_COLOR = "F5B7B1"
-
 # ---------------------------------------------------------------------------
 # Friendly Labels: menschenlesbare Anzeige-Namen im Deck-Board.
 # Das Board zeigt die Friendly-Titel; intern (Gates, Agent-Vertrag) arbeiten
@@ -40,6 +32,11 @@ _DEFAULT_FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
     "risk:high": ("\u26A0\uFE0F Risiko: Hoch", "FADBD8"),
     "type:implementation": ("\U0001F6E0\uFE0F Umsetzungsaufgabe", "D6EAF8"),
     "type:documentation": ("\U0001F4DA Dokumentation", "D7BDE2"),
+    # Status-Label "Waiting": reiner Sichtbarkeits-Indikator (kein Workflow-Gate).
+    # Der Adapter setzt es, wenn eine Karte das globale WIP-Limit erreicht hat
+    # und noch nicht gestartet werden kann. Wird beim tatsächlichen Start
+    # wieder entfernt. Wie alle anderen Labels über label_mapping konfigurierbar.
+    "waiting": ("\u23F3 Waiting", "F5B7B1"),
 }
 
 # Aktives Mapping (wird ggf. durch configure_friendly_labels ersetzt)

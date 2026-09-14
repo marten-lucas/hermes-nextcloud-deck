@@ -88,11 +88,12 @@ corrected). The value can also be set via the environment variable
 
 `max_in_progress` is optional (default `0` = unlimited). It is the
 **work-in-progress limit**: the maximum number of cards that may sit in active
-columns (`Todo`/`Ready`/`Running`) at the same time. When the limit is reached,
-new cards in those columns are **not** started until a running one moves to
-`Review`/`Blocked`/`Done`. Set `1` to force strictly sequential execution so the
-model never multitasks across cards. Also settable via
-`NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
+columns (`Todo`/`Ready`/`Running`) at the same time, counted **globally across
+all configured boards**. When the limit is reached, new cards in those columns
+are **not** started until a running one moves to `Review`/`Blocked`/`Done`; the
+queued card gets the `⏳ Waiting` label so it is visible that the adapter saw it
+but is busy. Set `1` to force strictly sequential execution so the model never
+multitasks across cards. Also settable via `NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
 
 ## Diagnostics
 
@@ -181,6 +182,11 @@ before starting; the agent sets `phase` and `approval` as it works.
 | `hermes/phase:execute` | agent | Execute the approved plan, check off subtasks with evidence. |
 | `hermes/approval:required` | agent | The plan waits for your approval. |
 | `hermes/approval:approved` | human | You approve the plan — the agent may move to `execute`. |
+| `waiting` (⏳ Waiting) | adapter | Visibility marker: the card was seen but is queued behind the WIP limit. Removed automatically when it starts. |
+
+All labels (including `waiting`) are configurable via `extra.label_mapping` in
+`config.yaml` — you can rename them or change their color, exactly like the
+`phase`/`type`/`risk`/`approval` labels.
 
 ### The flow, step by step
 

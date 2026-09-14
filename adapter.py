@@ -31,7 +31,6 @@ try:
         TEMPLATE_DESCRIPTION,
         description_matches_template,
         missing_template_sections,
-        WAITING_LABEL_TITLE,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -67,7 +66,6 @@ except ImportError:  # direct test/import
         TEMPLATE_DESCRIPTION,
         description_matches_template,
         missing_template_sections,
-        WAITING_LABEL_TITLE,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -1231,12 +1229,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     "Deck: WIP-Limit erreicht (%d >= %d) — Karte %s ('%s') noch nicht gestartet.",
                     active, self.runtime.max_in_progress, card_id, snapshot.title,
                 )
-                await self._apply_label_to_card(card_id, WAITING_LABEL_TITLE)
+                await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
                 return
 
         # Karte wird jetzt tatsächlich gestartet — ein evtl. gesetztes
         # "Waiting"-Label (aus einem früheren WIP-Block) wieder entfernen.
-        await self._remove_label_from_card(card_id, WAITING_LABEL_TITLE)
+        await self._remove_label_from_card(card_id, friendly_label_title("waiting"))
 
         actor_id, groups, is_fallback = await self.identity.resolve_card_actor(card, last_author)
 
