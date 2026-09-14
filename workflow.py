@@ -12,9 +12,6 @@ logger = logging.getLogger(__name__)
 
 # Standard-Präfixe für Hermes Deck-Labels (technisch, kanonisch)
 LABEL_PREFIX_PHASE = "hermes/phase:"
-LABEL_PREFIX_TYPE = "hermes/type:"
-LABEL_PREFIX_RISK = "hermes/risk:"
-LABEL_PREFIX_APPROVAL = "hermes/approval:"
 
 # ---------------------------------------------------------------------------
 # Friendly Labels: menschenlesbare Anzeige-Namen im Deck-Board.
@@ -266,29 +263,6 @@ _TEMPLATE_PLACEHOLDER_MARKERS = (
 )
 
 
-def _split_h1_blocks(text: str) -> List[Tuple[str, str]]:
-    """Zerlegt eine Description in (Titel, Block)-Paare anhand von H1-Überschriften.
-
-    H2-Überschriften ('## ') bleiben im übergeordneten H1-Block. Gibt eine Liste
-    von (header, body) zurück; der erste Eintrag kann einen leeren Header haben,
-    wenn die Description nicht mit einer H1-Überschrift beginnt.
-    """
-    blocks: List[Tuple[str, str]] = []
-    current_title: Optional[str] = None
-    current_lines: List[str] = []
-    for line in (text or "").splitlines():
-        if line.startswith("# ") and not line.startswith("## "):
-            if current_title is not None or current_lines:
-                blocks.append((current_title or "", "\n".join(current_lines).rstrip()))
-            current_title = line[2:].strip()
-            current_lines = [line]
-        else:
-            current_lines.append(line)
-    if current_title is not None or current_lines:
-        blocks.append((current_title or "", "\n".join(current_lines).rstrip()))
-    return blocks
-
-
 def split_agent_workspace(description: str) -> Tuple[str, Optional[str]]:
     """Teilt die Description am "# Agent Workspace"-Marker.
 
@@ -411,11 +385,6 @@ STATUS_REVIEW = "review"
 STATUS_BLOCKED = "blocked"
 STATUS_DONE = "done"
 
-# Default-Status, die durch Gates für den Agenten gesperrt sind
-# - done darf NIE direkt vom Agenten angesteuert werden (erfordert menschliche Abnahme nach review)
-# - backlog ist die Ideensammlung, die der Agent nicht selbst ansteuern soll
-GATED_AGENT_STATUSES: Set[str] = {STATUS_DONE, STATUS_BACKLOG}
-
 # Alle kanonischen Lifecycle-Spalten aus dem v5-Konzept (Reihenfolge = Board-Layout).
 CANONICAL_STATUSES: Tuple[str, ...] = (
     STATUS_BACKLOG,
@@ -527,7 +496,6 @@ current_deck_action_count: contextvars.ContextVar[int] = contextvars.ContextVar(
 class Subtask:
     text: str
     done: bool
-    state_char: str
 
 
 @dataclass(frozen=True)
@@ -585,7 +553,7 @@ def parse_subtasks(description: str) -> SubtaskProgress:
         is_done = state.lower() == "x"
         if is_done:
             completed += 1
-        items.append(Subtask(text=text, done=is_done, state_char=state))
+        items.append(Subtask(text=text, done=is_done))
 
     return SubtaskProgress(total=len(items), completed=completed, subtasks=items)
 

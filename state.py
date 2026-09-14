@@ -83,7 +83,3 @@ class DeckStateManager:
         key = f"{snapshot.board_id}:{snapshot.card_id}"
         self._fingerprints[key] = snapshot.fingerprint()
         self._last_labels[key] = list(snapshot.labels or [])
-
-    def forget(self, board_id: str, card_id: str) -> None:
-        self._fingerprints.pop(f"{board_id}:{card_id}", None)
-        self._last_labels.pop(f"{board_id}:{card_id}", None)

@@ -15,10 +15,7 @@ try:
     from .outbound import categorize_gateway_message
     from .state import DeckCardSnapshot, DeckStateManager
     from .workflow import (
-        APPROVAL_APPROVED,
-        LABEL_PREFIX_APPROVAL,
         LABEL_PREFIX_PHASE,
-        PHASE_EXECUTE,
         PHASE_PLAN,
         build_capabilities_prompt,
         canonical_label_key,
@@ -28,13 +25,11 @@ try:
         friendly_label_title,
         has_workflow_label_change,
         TEMPLATE_CARD_TITLE,
-        TEMPLATE_DESCRIPTION,
         template_description,
         AGENT_WORKSPACE_MARKER,
         split_agent_workspace,
         DEFAULT_TEMPLATE_LANGUAGE,
         TEMPLATE_LANGUAGES,
-        description_matches_template,
         missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
@@ -55,10 +50,7 @@ except ImportError:  # direct test/import
     from outbound import categorize_gateway_message
     from state import DeckCardSnapshot, DeckStateManager
     from workflow import (
-        APPROVAL_APPROVED,
-        LABEL_PREFIX_APPROVAL,
         LABEL_PREFIX_PHASE,
-        PHASE_EXECUTE,
         PHASE_PLAN,
         build_capabilities_prompt,
         canonical_label_key,
@@ -68,13 +60,11 @@ except ImportError:  # direct test/import
         friendly_label_title,
         has_workflow_label_change,
         TEMPLATE_CARD_TITLE,
-        TEMPLATE_DESCRIPTION,
         template_description,
         AGENT_WORKSPACE_MARKER,
         split_agent_workspace,
         DEFAULT_TEMPLATE_LANGUAGE,
         TEMPLATE_LANGUAGES,
-        description_matches_template,
         missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,

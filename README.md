@@ -12,8 +12,7 @@ The integration is deliberately small and safe:
 - Deck comments are sent using JSON as documented by the Deck API;
 - API/network errors are surfaced instead of being silently converted to empty lists;
 - polling reports a connection only after an API request succeeds;
-- plugin-provided skills use Hermes' namespaced skill mechanism;
-- reminders are explicitly marked as not implemented rather than pretending to schedule them.
+- plugin-provided skills use Hermes' namespaced skill mechanism.
 
 ## Repository layout
 
