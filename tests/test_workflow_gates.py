@@ -151,7 +151,9 @@ class TestSetupTestCard(unittest.IsolatedAsyncioTestCase):
 class TestWorkflowLogic(unittest.TestCase):
     def test_parse_subtasks(self):
         desc = (
-            "# Task\n\n"
+            "# Objective\nZiel\n\n"
+            "# Agent Workspace\n"
+            "## Subtasks\n"
             "- [ ] 1. Schritt eins\n"
             "- [x] 2. Schritt zwei erledigt\n"
             "- [X] 3. Schritt drei erledigt\n"
@@ -271,28 +273,57 @@ class TestWorkflowLogic(unittest.TestCase):
 
     def test_description_matches_template(self):
         """Format-Prüfung erkennt valide vs. unausgefüllte/leere Descriptions."""
-        from workflow import description_matches_template, TEMPLATE_DESCRIPTION
+        from workflow import description_matches_template, template_description
 
         # Roh-Vorlage mit Platzhaltern → NICHT gültig
-        self.assertFalse(description_matches_template(TEMPLATE_DESCRIPTION))
+        self.assertFalse(description_matches_template(template_description("de")))
 
         # Leer → nicht gültig
         self.assertFalse(description_matches_template(""))
         self.assertFalse(description_matches_template("  "))
 
-        # Valide ausgefüllte Karte
+        # Valide ausgefüllte Karte (neue Struktur: 4 Mensch-Sektionen + Agent Workspace)
         valid = (
             "# Objective\nTermin ermitteln\n\n"
             "# Context\nTest\n\n"
+            "# Constraints\nkeine\n\n"
             "# Acceptance Criteria\n- [x] Datum ermittelt\n\n"
-            "# Plan\n## Subtasks\n- [x] 1. Datum holen\n\n"
-            "# Verification\ndate ausgeführt\n\n"
-            "# Result\nErledigt"
+            "# Agent Workspace\n## Subtasks\n- [x] 1. Datum holen\n\n"
+            "## Re-Briefing\nalles ok\n\n## Ergebnisse\nSeite erstellt\n\n## Verifikation\ngeprüft"
         )
         self.assertTrue(description_matches_template(valid))
 
-        # Fehlende Kernabschnitte → nicht gültig
-        self.assertFalse(description_matches_template("# Objective\nNur Ziel ohne Plan\n- [ ] x"))
+        # Fehlende Mensch-Sektionen → nicht gültig
+        self.assertFalse(description_matches_template("# Objective\nNur Ziel\n# Agent Workspace\n## Subtasks\n- [ ] x"))
+
+    def test_split_agent_workspace(self):
+        from workflow import split_agent_workspace
+
+        desc = (
+            "# Objective\nZiel\n\n# Agent Workspace\n## Subtasks\n- [ ] x"
+        )
+        human, agent = split_agent_workspace(desc)
+        self.assertTrue(human.rstrip().endswith("# Agent Workspace"))
+        self.assertIn("# Objective", human)
+        self.assertEqual(agent.strip(), "## Subtasks\n- [ ] x")
+
+        # Ohne Marker: agent_part = None
+        human2, agent2 = split_agent_workspace("# Objective\nZiel")
+        self.assertIsNone(agent2)
+        self.assertEqual(human2, "# Objective\nZiel")
+
+    def test_parse_subtasks_scoped(self):
+        from workflow import parse_subtasks
+
+        desc = (
+            "# Objective\nx\n"
+            "# Acceptance Criteria\n- [ ] AC1\n- [ ] AC2\n"
+            "# Agent Workspace\n## Subtasks\n- [ ] S1\n- [x] S2\n"
+            "## Ergebnisse\n- [ ] Ergebnis1\n"
+        )
+        progress = parse_subtasks(desc)
+        self.assertEqual(progress.total, 2)
+        self.assertEqual(progress.completed, 1)
 
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))

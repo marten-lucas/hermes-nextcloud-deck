@@ -159,14 +159,54 @@ def friendly_label_title(canonical_key: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Task-Contract-Template (Description-Vorlage) + Format-Prüfung.
-# Wird genutzt, um (a) neue Karten im richtigen Format zu garantieren und
-# (b) eine Referenz-Vorlagenkarte im Backlog zu pflegen. Die Abschnitte sind
-# Konvention (nicht technisch geparst) — nur die Markdown-Checkboxen werden
-# als Subtasks ausgewertet.
+# Die Karte ist in zwei Zonen geteilt:
+#   - MENSCH-Teil (Objective/Context/Constraints/Acceptance Criteria): wird vom
+#     Agenten NIE verändert.
+#   - AGENT-WORKSPACE (ab dem Marker "# Agent Workspace"): hier schreibt der
+#     Agent seine Subtasks, das Re-Briefing, die Ergebnisse und die Verifikation.
+#     Der Adapter ersetzt nur den Teil AB dem Marker — der Mensch-Teil bleibt
+#     byte-genau erhalten.
+# Die H1-Sektionsnamen sind sprachneutral (identisch in de/en); nur die
+# H2-Agent-Sektionen und Platzhalter-Texte werden übersetzt.
 # ---------------------------------------------------------------------------
 TEMPLATE_CARD_TITLE = "Vorlage (Template)"
 
-TEMPLATE_DESCRIPTION = """# Objective
+# H1-Marker, der die Grenze zwischen Mensch- und Agent-Teil markiert.
+AGENT_WORKSPACE_MARKER = "Agent Workspace"
+
+# Kern-Sektionen des Mensch-Teils (H1, sprachneutral).
+HUMAN_SECTIONS = (
+    "Objective",
+    "Context",
+    "Constraints",
+    "Acceptance Criteria",
+)
+
+# Agent-Sektionen (H2, werden übersetzt). Reihenfolge = Template-Layout.
+AGENT_SUBTASKS = "Subtasks"
+AGENT_REBRIEFING = "Re-Briefing"
+AGENT_RESULTS = "Results"
+AGENT_VERIFICATION = "Verification"
+
+# Sprachabhängige Anzeige-Titel der Agent-H2-Sektionen.
+_AGENT_SECTION_TITLES: Dict[str, Dict[str, str]] = {
+    "de": {
+        "subtasks": "Subtasks",
+        "rebriefing": "Re-Briefing",
+        "results": "Ergebnisse",
+        "verification": "Verifikation",
+    },
+    "en": {
+        "subtasks": "Subtasks",
+        "rebriefing": "Re-Briefing",
+        "results": "Results",
+        "verification": "Verification",
+    },
+}
+
+# Sprachabhängige Platzhalter-Texte für den Template-Körper.
+_TEMPLATE_BODIES: Dict[str, str] = {
+    "de": """# Objective
 
 _Beschreibe hier in 1-2 Sätzen das Ziel der Aufgabe._
 
@@ -174,145 +214,183 @@ _Beschreibe hier in 1-2 Sätzen das Ziel der Aufgabe._
 
 _Hintergrund, betroffene Systeme, relevante Informationen._
 
+# Constraints
+
+- Einschränkung / nicht erlaubte Änderungen
+
 # Acceptance Criteria
 
 - [ ] Kriterium 1 erfüllt
 - [ ] Kriterium 2 erfüllt
 
-# Plan
+# Agent Workspace
 
 ## Subtasks
 
-- [ ] 1. Erster Arbeitsschritt
-- [ ] 2. Zweiter Arbeitsschritt
+## Re-Briefing
+
+## Ergebnisse
+
+## Verifikation""",
+    "en": """# Objective
+
+_Describe the goal of the task in 1-2 sentences._
+
+# Context
+
+_Background, affected systems, relevant information._
 
 # Constraints
 
-- Einschränkung / nicht erlaubte Änderungen
+- Constraint / changes not allowed
 
-# Verification
+# Acceptance Criteria
 
-_Wie wird die Umsetzung verifiziert?_
+- [ ] Criterion 1 met
+- [ ] Criterion 2 met
 
-# Result
+# Agent Workspace
 
-_pending_
-"""
+## Subtasks
 
-# Abschnitte, die eine valide Karte enthalten sollte. Werden als lockere
-# Format-Prüfung genutzt (eine Karte gilt als "im Format", wenn mindestens
-# die Kernabschnitte vorhanden sind). Sprachneutral & tolerant.
-TEMPLATE_REQUIRED_SECTIONS = (
-    "objective",
-    "acceptance criteria",
-    "plan",
-)
+## Re-Briefing
 
-# Markierungen, an denen eine leere/unausgefüllte Karte erkannt wird.
+## Results
+
+## Verification""",
+}
+
+# Default-Sprache, wenn keine konfiguriert ist.
+DEFAULT_TEMPLATE_LANGUAGE = "de"
+
+# Erlaubte Sprachen.
+TEMPLATE_LANGUAGES = ("de", "en")
+
+
+def template_description(language: str = DEFAULT_TEMPLATE_LANGUAGE) -> str:
+    """Gibt die vollständige Template-Description für die gewünschte Sprache zurück."""
+    lang = (language or DEFAULT_TEMPLATE_LANGUAGE).strip().lower()
+    if lang not in _TEMPLATE_BODIES:
+        lang = DEFAULT_TEMPLATE_LANGUAGE
+    return _TEMPLATE_BODIES[lang]
+
+
+# Rückwärtskompatible Alias: TEMPLATE_DESCRIPTION = deutsches Template.
+TEMPLATE_DESCRIPTION = template_description(DEFAULT_TEMPLATE_LANGUAGE)
+
+
+def agent_section_title(language: str, key: str) -> str:
+    """Übersetzter H2-Titel einer Agent-Sektion (z. B. 'results' → 'Ergebnisse')."""
+    lang = (language or DEFAULT_TEMPLATE_LANGUAGE).strip().lower()
+    if lang not in _AGENT_SECTION_TITLES:
+        lang = DEFAULT_TEMPLATE_LANGUAGE
+    return _AGENT_SECTION_TITLES[lang].get(key, key)
+
+
+# Markierungen, an denen eine leere/unausgefüllte Karte erkannt wird (Minimum).
 _TEMPLATE_PLACEHOLDER_MARKERS = (
     "_beschreibe hier",
-    "_pending_",
+    "_describe the goal",
     "_hintergrund",
-    "_wie wird",
-    "_einschränkung",
-    "kriterium ",
-    "arbeitsschritt",
+    "_background",
 )
+
+
+def _split_h1_blocks(text: str) -> List[Tuple[str, str]]:
+    """Zerlegt eine Description in (Titel, Block)-Paare anhand von H1-Überschriften.
+
+    H2-Überschriften ('## ') bleiben im übergeordneten H1-Block. Gibt eine Liste
+    von (header, body) zurück; der erste Eintrag kann einen leeren Header haben,
+    wenn die Description nicht mit einer H1-Überschrift beginnt.
+    """
+    blocks: List[Tuple[str, str]] = []
+    current_title: Optional[str] = None
+    current_lines: List[str] = []
+    for line in (text or "").splitlines():
+        if line.startswith("# ") and not line.startswith("## "):
+            if current_title is not None or current_lines:
+                blocks.append((current_title or "", "\n".join(current_lines).rstrip()))
+            current_title = line[2:].strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_title is not None or current_lines:
+        blocks.append((current_title or "", "\n".join(current_lines).rstrip()))
+    return blocks
+
+
+def split_agent_workspace(description: str) -> Tuple[str, Optional[str]]:
+    """Teilt die Description am "# Agent Workspace"-Marker.
+
+    Rückgabe (human_part, agent_part):
+    - ``human_part``: alles VOR dem Marker (inkl. Marker-Zeile), byte-genau.
+    - ``agent_part``: alles NACH dem Marker (die H2-Agent-Sektionen), oder None,
+      wenn kein Marker vorhanden ist.
+    """
+    text = (description or "").rstrip("\n")
+    marker_line = f"# {AGENT_WORKSPACE_MARKER}"
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == marker_line:
+            human_part = "\n".join(lines[: i + 1]).rstrip()
+            agent_part = "\n".join(lines[i + 1 :]).strip()
+            return human_part, (agent_part or None)
+    return text, None
+
+
+def _present_human_sections(description: str) -> Set[str]:
+    """Ermittelt die vorhandenen Mensch-Teil-H1-Sektionen (lowercase)."""
+    text = (description or "").lower()
+    present: Set[str] = set()
+    for section in HUMAN_SECTIONS:
+        if f"# {section.lower()}" in text:
+            present.add(section.lower())
+    return present
+
+
+def missing_template_sections(description: str) -> List[str]:
+    """Gibt die fehlenden Mensch-Teil-H1-Sektionen als leere Gerüst-Blöcke zurück.
+
+    Prüft ausschließlich, ob die vier Mensch-Sektionen (Objective, Context,
+    Constraints, Acceptance Criteria) als H1-Überschriften vorhanden sind.
+    Fehlende werden als leere Überschriften (ohne Platzhalter-Inhalt) geliefert,
+    damit sie UNTEN an die bestehende Description angehängt werden können.
+    """
+    text = (description or "").strip()
+    if not text:
+        return []
+
+    present = _present_human_sections(text)
+
+    missing: List[str] = []
+    for section in HUMAN_SECTIONS:
+        if section.lower() in present:
+            continue
+        missing.append(f"# {section}")
+
+    return missing
 
 
 def description_matches_template(description: str) -> bool:
     """Prüft, ob eine Description das Task-Contract-Format (grob) erfüllt.
 
     Kriterien:
-    - enthält mindestens die Kernabschnitte (# Objective, # Acceptance Criteria, # Plan)
-    - enthält mindestens eine Markdown-Checkbox (Subtasks/Acceptance)
+    - enthält alle vier Mensch-Sektionen (Objective/Context/Constraints/Acceptance Criteria)
+    - enthält den Agent-Workspace-Marker ("# Agent Workspace")
     - enthält keine unausgefüllten Platzhalter (rohe Vorlage)
 
     Rückgabe True = Format OK, False = muss (vom Adapter) korrigiert werden.
     """
-    return not missing_template_sections(description) and bool(_CHECKBOX_PATTERN.search((description or "").strip())) and not any(m in (description or "").lower() for m in _TEMPLATE_PLACEHOLDER_MARKERS)
-
-
-def _section_title(key: str) -> str:
-    """Menschlicher Anzeige-Titel eines Template-Abschnitts (z. B. 'acceptance criteria')."""
-    return key.strip().lstrip("#").strip()
-
-
-def _present_section_keys(description: str) -> Set[str]:
-    """Ermittelt die in einer Description vorhandenen Kernabschnitt-Keys (lowercase)."""
-    text = (description or "").lower()
-    present: Set[str] = set()
-    for section in TEMPLATE_REQUIRED_SECTIONS:
-        if f"# {section}" in text or f"## {section}" in text:
-            present.add(section)
-    return present
-
-
-def _template_section_blocks() -> Dict[str, str]:
-    """Zerlegt TEMPLATE_DESCRIPTION in Abschnittsblöcke (Key -> Markdown-Block).
-
-    Jeder Block beginnt bei der '#<name>'-Überschrift und endet vor der
-    nächsten Überschrift. Der Block wird NIE mit einem Platzhalter-Inhalt
-    ('_Beschreibe hier…' etc.) angehängt — fehlende Abschnitte werden als
-    leere Gerüst-Blöcke (nur Überschrift + ggf. leere Subtasks-Zeile) ergänzt.
-    """
-    blocks: Dict[str, str] = {}
-    lines = TEMPLATE_DESCRIPTION.splitlines()
-    current_key: Optional[str] = None
-    current_lines: List[str] = []
-    for line in lines:
-        # Nur h1-Überschriften ('# ') trennen Abschnitte; h2 ('## Subtasks')
-        # gehört zum übergeordneten Abschnitt (Markdown-Hierarchie).
-        if line.startswith("# ") and not line.startswith("## "):
-            if current_key is not None:
-                blocks[current_key] = "\n".join(current_lines).rstrip()
-            current_key = line[2:].strip().lower()
-            current_lines = [line]
-        else:
-            if current_key is not None:
-                current_lines.append(line)
-    if current_key is not None:
-        blocks[current_key] = "\n".join(current_lines).rstrip()
-    return blocks
-
-
-def missing_template_sections(description: str) -> List[str]:
-    """Gibt die Markdown-Blöcke der fehlenden Kernabschnitte zurück.
-
-    Es wird ausschließlich geprüft, ob die Kernabschnitte (# Objective,
-    # Acceptance Criteria, # Plan) als Überschriften vorhanden sind. Fehlende
-    Abschnitte werden als leeres Gerüst (Überschrift + leere Checkbox) geliefert,
-    damit sie UNTEN an die bestehende Description angehängt werden können —
-    der vorhandene, vom Menschen verfasste Inhalt bleibt unangetastet.
-    """
     text = (description or "").strip()
     if not text:
-        return []
-
-    present = _present_section_keys(text)
-    template_blocks = _template_section_blocks()
-
-    missing: List[str] = []
-    for section in TEMPLATE_REQUIRED_SECTIONS:
-        if section in present:
-            continue
-        block = template_blocks.get(section)
-        if not block:
-            continue
-        # Platzhalter-Zeilen (_Beschreibe…, Kriterium 1 …, Erster Arbeitsschritt …)
-        # entfernen — der Mensch bekommt ein neutrales Gerüst, keine Roh-Vorlage.
-        cleaned: List[str] = []
-        for line in block.splitlines():
-            low = line.strip().lower()
-            if any(m in low for m in _TEMPLATE_PLACEHOLDER_MARKERS):
-                continue
-            cleaned.append(line)
-        # Überschrift immer behalten (erste Zeile ist der '# <section>'-Header).
-        header = cleaned[0] if cleaned else f"# {_section_title(section)}"
-        body = cleaned[1:] if len(cleaned) > 1 else []
-        missing.append("\n".join([header, *body]).rstrip())
-
-    return missing
+        return False
+    if missing_template_sections(text):
+        return False
+    if f"# {AGENT_WORKSPACE_MARKER.lower()}" not in text.lower():
+        return False
+    if any(m in text.lower() for m in _TEMPLATE_PLACEHOLDER_MARKERS):
+        return False
+    return True
 
 
 def workflow_label_keys(label_titles: List[str]) -> Set[str]:
@@ -501,13 +579,37 @@ class SubtaskProgress:
 
 
 def parse_subtasks(description: str) -> SubtaskProgress:
-    """Extrahiert alle Markdown-Checkboxen aus der Beschreibung."""
+    """Extrahiert die Markdown-Checkboxen der `## Subtasks`-Sektion.
+
+    Es werden NUR Checkboxen innerhalb der Subtasks-Sektion (zwischen der
+    '## Subtasks'-Überschrift und der nächsten '#'-Überschrift) ausgewertet —
+    nicht beliebige Checkboxen aus Acceptance Criteria oder dem Briefing.
+    """
     if not description:
         return SubtaskProgress(total=0, completed=0, subtasks=[])
 
+    # Subtasks-Sektion lokalisieren: '## Subtasks' (oder '## <titel>') bis zur
+    # nächsten '#'-Überschrift (H1 oder H2).
+    lines = description.splitlines()
+    in_subtasks = False
+    section_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## ") and stripped[3:].strip().lower().startswith("subtask"):
+            in_subtasks = True
+            section_lines.append(line)
+            continue
+        if in_subtasks and stripped.startswith("#"):
+            break
+        if in_subtasks:
+            section_lines.append(line)
+
     items: List[Subtask] = []
     completed = 0
-    for match in _CHECKBOX_PATTERN.finditer(description):
+    for line in section_lines:
+        match = _CHECKBOX_PATTERN.match(line)
+        if not match:
+            continue
         state = match.group("state")
         text = match.group("text").strip()
         is_done = state.lower() == "x"
@@ -588,37 +690,43 @@ def build_capabilities_prompt(
             "**MODUS: PLAN / KONZEPTION (READ-ONLY)**",
             "- Du befindest dich in der Planungsphase. Führe KEINE produktiven Änderungen an Systemen durch.",
             "- Sammle Informationen, untersuche Logs/Konfigurationen read-only und identifiziere Risiken.",
-            "- Aktualisiere die Karten-Beschreibung mit strukturiertem Plan:",
-            "  * Objective & Context",
-            "  * Acceptance Criteria (- [ ] ...)",
-            "  * Plan & Subtasks (- [ ] 1. Schritt ...)",
-            "  * Verification",
+            "- Die Karte hat einen MENSCH-Teil (Objective/Context/Constraints/Acceptance Criteria)",
+            "  und einen AGENT-WORKSPACE ab dem Marker '# Agent Workspace'.",
+            "  ⚠️ Du darfst NUR den Inhalt des Agent-Workspace schreiben. Die Abschnitte",
+            "  VOR dem Marker gehören dem Menschen und bleiben UNVERÄNDERT.",
+            "- Aktualisiere im Agent-Workspace (als 'description' an deck_card_action NUR",
+            "  die ##-Sektionen, OHNE den '# Agent Workspace'-Marker zu wiederholen):",
+            "  * ## Subtasks: konkrete Arbeitsschritte als Checkboxen (- [ ] ...)",
+            "  * ## Re-Briefing: ob alles wie gewünscht umsetzbar ist oder was nicht (Klärungsbedarf/Risiken)",
             "- Wenn der Plan fertig ist:",
             "  * Verschiebe die Karte nach 'review'",
             f"  * Setze Label '{lbl_approval}' (oder fordere Freigabe per Kommentar)",
             "  * Wechsle NICHT selbst nach 'execute' — warte auf die menschliche Freigabe!",
             "",
-            "📌 **VERPFLICHTEND:** Wenn du die Beschreibung aktualisierst, MUSS derselbe",
+            "📌 **VERPFLICHTEND:** Wenn du den Agent-Workspace aktualisierst, MUSS derselbe",
             "`deck_card_action`-Aufruf auch `target_status: \"review\"` enthalten. Ein",
             "Beschreibungs-Update OHNE target_status ist ein Vertragsbruch — die Karte",
             "bleibt sonst in ihrer Spalte liegen. Rufe das Tool EINMAL mit allem auf:",
-            "  {\"card_id\": ..., \"description\": ..., \"target_status\": \"review\",",
+            "  {\"card_id\": ..., \"description\": \"## Subtasks\\n- [ ] 1. ...\\n\\n## Re-Briefing\\n...\", \"target_status\": \"review\",",
             f"   \"assign_labels\": [\"{lbl_approval}\"]}}",
         ])
     else:  # EXECUTE
         lbl_approval = friendly_label_title("approval:required")
         lines.extend([
             "**MODUS: EXECUTE / UMSETZUNG**",
-            "- Der Plan wurde freigegeben. Setze die Subtasks aus der Beschreibung sequenziell um.",
-            "- Hake erledigte Subtasks in der Beschreibung mit [x] ab.",
-            "- Dokumentiere bei wichtigen/riskanten Schritten konkrete Nachweise (Evidence: ...).",
+            "- Der Plan wurde freigegeben. Setze die Subtasks aus dem Agent-Workspace sequenziell um.",
+            "- Hake erledigte Subtasks in '## Subtasks' mit [x] ab (NUR diese Sektion).",
+            "- ⚠️ Du darfst NUR den Agent-Workspace verändern — Objective/Context/Constraints/",
+            "  Acceptance Criteria des Menschen bleiben UNVERÄNDERT.",
+            "- Fülle beim Fortschritt:",
+            "  * '## Ergebnisse': Links/Verweise auf die erstellten Ergebnisse.",
+            "  * '## Verifikation': wie die Umsetzung verifiziert wurde.",
             "- **WICHTIG (Anti-Halluzination/Sicherheit):**",
             "  * Erfinde den Plan bei Problemen NICHT eigenmächtig neu!",
             "  * Wenn ein Teilschritt fehlschlägt oder der Plan nicht passt: Setze Status auf 'blocked'",
             "    und poste einen Kommentar '🤖 PLAN CHANGE REQUESTED' mit Begründung.",
             "- Nach erfolgreicher Abarbeitung aller Subtasks und Verifikation:",
             "  * Verschiebe nach 'review' (NICHT nach 'done' — der Mensch nimmt ab!)",
-            "  * Dokumentiere das Gesamtergebnis im Result-Bereich der Beschreibung.",
             f"  * Setze '{lbl_approval}' für die Abnahme.",
         ])
 

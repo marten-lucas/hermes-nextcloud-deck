@@ -41,3 +41,7 @@ optional_env:
     description: "Max concurrent cards in work (todo/ready/running); 0 = unlimited (default)"
     prompt: "Work-in-progress limit"
     password: false
+  - name: NEXTCLOUD_DECK_TEMPLATE_LANGUAGE
+    description: "Template language (de or en, default de)"
+    prompt: "Template language"
+    password: false

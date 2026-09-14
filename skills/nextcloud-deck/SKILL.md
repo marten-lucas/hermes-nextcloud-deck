@@ -48,12 +48,25 @@ Status, Labels und Assignee. Die `card_id` steht im Kontext (`Karten-ID (card_id
 
 Wichtige Ablaufregeln:
 
+- **Kartenstruktur (Agent Workspace):** Jede Karte hat einen **Menschen-Teil**
+  (H1-Sektionen `# Objective`, `# Context`, `# Constraints`,
+  `# Acceptance Criteria`) und einen **Agent-Teil** unterhalb des Markers
+  `# Agent Workspace` (H2-Sektionen `## Subtasks`, `## Re-Briefing`,
+  `## Ergebnisse`, `## Verifikation`). **Regel: Der Agent darf NUR die
+  Sektionen unterhalb von `# Agent Workspace` ändern.** Die Menschen-Sektionen
+  (Objective/Context/Constraints/Acceptance Criteria) sind tabu und bleiben
+  unverändert.
+  - **Plan:** `## Subtasks` (Checkbox-Liste) + `## Re-Briefing` (Kurzfassung
+    des Plans) ausfüllen.
+  - **Execute:** `## Subtasks` sequenziell abhaken (`[x]`), Ergebnisse unter
+    `## Ergebnisse`, Verifikationshinweise unter `## Verifikation` eintragen.
 - **Description nur VOLLSTÄNDIG senden:** Das Feld `description` in
   `deck_card_action` **ersetzt** den kompletten Karteninhalt. Sende es NUR,
-  wenn du den vollständigen Markdown (alle Abschnitte: Objective, Acceptance
-  Criteria, Plan/Subtasks, Result) fertig hast. Willst du nur Status/Labels/
-  Assignee ändern, **lasse `description` weg** — ein unvollständiger
-  Description-Text zerstört den bestehenden Inhalt.
+  wenn du den vollständigen Markdown (Menschen-Sektionen + Agent Workspace)
+  fertig hast. Willst du nur Status/Labels/Assignee ändern, **lasse
+  `description` weg** — ein unvollständiger Description-Text zerstört den
+  bestehenden Inhalt. Behalte die Menschen-Sektionen unverändert bei und
+  ergänze/aktualisiere nur den Agent-Teil unterhalb von `# Agent Workspace`.
 - **Plan fertig:** `deck_card_action` mit `description` (Plan inkl. Subtasks),
   `target_status: "review"` und `assign_labels: ["hermes/approval:required"]`.
   Die Karte bleibt in `hermes/phase:plan`, bis ein Mensch freigibt.
@@ -81,6 +94,7 @@ platforms:
       app_password: "..."
       hermes_user_id: "hermes"
       poll_interval_seconds: 30
+      template_language: "de"   # "de" (default) oder "en" — Sprache der Kartenvorlage
       boards:
         - board_id: "7"
           stack_mapping:

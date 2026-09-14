@@ -29,6 +29,11 @@ try:
         has_workflow_label_change,
         TEMPLATE_CARD_TITLE,
         TEMPLATE_DESCRIPTION,
+        template_description,
+        AGENT_WORKSPACE_MARKER,
+        split_agent_workspace,
+        DEFAULT_TEMPLATE_LANGUAGE,
+        TEMPLATE_LANGUAGES,
         description_matches_template,
         missing_template_sections,
         FRIENDLY_LABELS,
@@ -64,6 +69,11 @@ except ImportError:  # direct test/import
         has_workflow_label_change,
         TEMPLATE_CARD_TITLE,
         TEMPLATE_DESCRIPTION,
+        template_description,
+        AGENT_WORKSPACE_MARKER,
+        split_agent_workspace,
+        DEFAULT_TEMPLATE_LANGUAGE,
+        TEMPLATE_LANGUAGES,
         description_matches_template,
         missing_template_sections,
         FRIENDLY_LABELS,
@@ -153,6 +163,7 @@ class DeckRuntimeConfig:
     destructive_tool_patterns: List[str] = None  # type: ignore[assignment]
     backlog_format_quiet_seconds: float = BACKLOG_FORMAT_QUIET_SECONDS
     max_in_progress: int = 0
+    template_language: str = DEFAULT_TEMPLATE_LANGUAGE
 
 
 def _load_dotenv_fallback() -> Dict[str, str]:
@@ -272,6 +283,16 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     if max_in_progress < 0:
         max_in_progress = 0
 
+    # Template-Sprache (de/en). Bestimmt die Sprache der automatisch angelegten
+    # Vorlagenkarte und der Format-Gerüste.
+    template_language = str(
+        extra.get("template_language")
+        or _env("NEXTCLOUD_DECK_TEMPLATE_LANGUAGE", "NEXTCLOUD_DECK_TEMPLATE_LANGUAGE")
+        or DEFAULT_TEMPLATE_LANGUAGE
+    ).strip().lower()
+    if template_language not in TEMPLATE_LANGUAGES:
+        template_language = DEFAULT_TEMPLATE_LANGUAGE
+
     boards: Dict[str, Dict[str, Any]] = {}
     raw_boards = extra.get("boards") or []
     if isinstance(raw_boards, list):
@@ -337,6 +358,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         destructive_tool_patterns=destructive_patterns,
         backlog_format_quiet_seconds=backlog_format_quiet_seconds,
         max_in_progress=max_in_progress,
+        template_language=template_language,
     )
 
 
@@ -759,44 +781,57 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
 
     async def _update_card_description(self, card_id: str, description: str) -> bool:
-        """Aktualisiert die Karten-Beschreibung (sucht Board/Stack über die konfigurierten Boards).
+        """Aktualisiert den AGENT-WORKSPACE-Teil der Karten-Beschreibung.
 
-        Absicherung gegen abgeschnittene Agent-Ausgaben (z. B. durch einen
-        Gateway-Restart mitten im Turn): Ist die neue Description ein bloßes
-        Präfix/Fragment der bestehenden (die bestehende beginnt mit dem neuen
-        Text), wird die bestehende BEHALTEN und der unvollständige Text
-        verworfen — sonst würde der Datenverlust den vollständigen Inhalt
-        zerstören. Nur eine substantiell andere/längere Description wird
-        übernommen.
+        Der Agent sendet nur den Inhalt seiner Agent-Sektionen (die ``##``-
+        Blöcke unterhalb des ``# Agent Workspace``-Markers). Dieser Handler
+        ersetzt ausschließlich den Teil AB dem Marker — der Mensch-Teil
+        (Objective/Context/Constraints/Acceptance Criteria) bleibt byte-genau
+        erhalten. Ist noch kein Marker vorhanden (z. B. alte Karte), wird er
+        zusammen mit dem Agent-Inhalt angehängt.
+
+        Truncation-Absicherung: Ist der neue Agent-Teil ein bloßes Präfix des
+        bestehenden Agent-Teils (Abruch mitten im Schreiben), wird er verworfen.
         """
         location = await self._locate_card(card_id)
         if location is None:
             return False
         board_id, stack_id = location
 
-        new_text = (description or "").strip()
+        new_agent = (description or "").strip()
 
-        # Bestehende Description laden, um Truncation zu erkennen.
         try:
             current_card = await self.client.get_card(board_id, stack_id, card_id)
-            existing = str((current_card or {}).get("description") or "").strip()
+            existing = str((current_card or {}).get("description") or "")
         except NextcloudDeckError:
             existing = ""
 
-        if existing:
-            existing_head = existing[:max(1, len(new_text))]
-            # Truncation-Evidenz: neuer Text ist deutlich kürzer UND die
-            # bestehende Description beginnt mit dem neuen Text (Präfix). Dann
-            # ist der Agent mitten im Schreiben abgebrochen → nichts überschreiben.
-            if new_text and len(new_text) < len(existing) and existing_head == new_text:
+        human_part, old_agent = split_agent_workspace(existing)
+
+        # Truncation-Verdacht: neuer Agent-Teil ist ein Präfix des bisherigen.
+        if old_agent and new_agent:
+            old_agent_stripped = old_agent.strip()
+            head = old_agent_stripped[: max(1, len(new_agent))]
+            if len(new_agent) < len(old_agent_stripped) and head == new_agent:
                 logger.warning(
-                    "Deck: Description-Update für Karte %s verworfen — neuer Text ist ein abgeschnittenes Präfix der bestehenden Description (Truncation-Verdacht, z. B. Gateway-Restart).",
+                    "Deck: Agent-Workspace-Update für Karte %s verworfen — neuer Text ist ein abgeschnittenes Präfix (Truncation-Verdacht).",
                     card_id,
                 )
                 return False
 
+        # Zusammenbauen: Mensch-Teil + Marker + neuer Agent-Teil.
+        marker_line = f"# {AGENT_WORKSPACE_MARKER}"
+        if human_part:
+            # human_part enthält bereits die Marker-Zeile (aus split_agent_workspace).
+            new_description = f"{human_part.rstrip()}\n\n{new_agent}".rstrip()
+        else:
+            new_description = f"{marker_line}\n\n{new_agent}".rstrip()
+
+        if not new_description:
+            return False
+
         try:
-            result = await self.client.update_card(board_id, stack_id, card_id, description=description)
+            result = await self.client.update_card(board_id, stack_id, card_id, description=new_description)
             return result is not None
         except NextcloudDeckError as exc:
             logger.warning("Deck description update failed for card %s: %s", card_id, exc)
@@ -1472,7 +1507,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                         board_id,
                         backlog_stack_id,
                         title=TEMPLATE_CARD_TITLE,
-                        description=TEMPLATE_DESCRIPTION,
+                        description=template_description(self.runtime.template_language),
                         order=0,
                     )
                     if created and created.get("id"):
@@ -1516,7 +1551,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 # Zusätzlich: eine völlig leere Description bekommt das komplette
                 # Skelett (hier gibt es nichts zu bewahren); sonst nur ergänzen.
                 if not missing and not description.strip():
-                    missing = [TEMPLATE_DESCRIPTION.strip()]
+                    missing = [template_description(self.runtime.template_language).strip()]
 
                 if not missing:
                     continue

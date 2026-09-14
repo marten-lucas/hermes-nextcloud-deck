@@ -259,6 +259,38 @@ which cannot pass structured metadata). Parameters: `card_id`, `target_status`,
 - Subtasks are Markdown checkboxes in the description (Deck has no checklist API);
   progress is derived from them, not stored separately.
 
+### Card structure (Agent Workspace)
+
+Every card has a **human section** (H1 blocks the agent must never modify) and an
+**agent section** below the `# Agent Workspace` marker:
+
+```markdown
+# Objective
+# Context
+# Constraints
+# Acceptance Criteria
+# Agent Workspace
+## Subtasks
+## Re-Briefing
+## Ergebnisse
+## Verifikation
+```
+
+- **Human section** (`# Objective`, `# Context`, `# Constraints`,
+  `# Acceptance Criteria`) — written and owned by the human. The adapter's
+  format check and template scaffold use these; the agent must **not** change them.
+- **Agent section** (everything below `# Agent Workspace`) — the only part the
+  agent edits:
+  - `## Subtasks` — checkbox list (plan → execute).
+  - `## Re-Briefing` — short restatement of the plan.
+  - `## Ergebnisse` (de) / `## Results` (en) — execution results.
+  - `## Verifikation` (de) / `## Verification` (en) — how the result was verified.
+
+The `# Agent Workspace` marker is added by the adapter; the agent only sends the
+`##` sections. The template language is configurable via
+`NEXTCLOUD_DECK_TEMPLATE_LANGUAGE` / `extra.template_language` (`de` default, `en`
+available).
+
 ### Trigger & dedup
 
 - `stack_id` **and** `labels` are part of the dedup fingerprint (`state.py`), so a
