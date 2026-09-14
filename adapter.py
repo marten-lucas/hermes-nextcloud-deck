@@ -31,6 +31,7 @@ try:
         TEMPLATE_DESCRIPTION,
         description_matches_template,
         missing_template_sections,
+        WAITING_LABEL_TITLE,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -66,6 +67,7 @@ except ImportError:  # direct test/import
         TEMPLATE_DESCRIPTION,
         description_matches_template,
         missing_template_sections,
+        WAITING_LABEL_TITLE,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         compile_destructive_patterns,
@@ -1054,32 +1056,34 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
         return self.runtime.boards.get(board_id)
 
-    async def _count_active_cards(self, board_id: str, exclude_card_id: Optional[str] = None) -> int:
-        """Zählt Karten in Arbeits-Spalten (todo/ready/running) eines Boards.
+    async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
+        """Zählt Karten in Arbeits-Spalten (todo/ready/running) über ALLE Boards.
 
-        Wird für das WIP-Limit genutzt: Karten, die der Mensch aktiv in den
-        Workflow gegeben hat (nicht Backlog/Review/Blocked/Done), gelten als
-        "in Arbeit". ``exclude_card_id`` blendet die aktuell betrachtete Karte
-        aus, damit deren eigener Status nicht die Zählung verfälscht.
+        Wird für das GLOBALE WIP-Limit genutzt: Karten, die der Mensch aktiv in
+        den Workflow gegeben hat (nicht Backlog/Review/Blocked/Done), gelten als
+        "in Arbeit" — unabhängig davon, auf welchem Board sie liegen.
+        ``exclude_card_id`` blendet die aktuell betrachtete Karte aus, damit
+        deren eigener Status nicht die Zählung verfälscht.
         """
         if not self.runtime.max_in_progress:
             return 0
-        try:
-            stacks = await self.client.get_stacks(board_id)
-        except NextcloudDeckError:
-            return 0
         active_titles = {"todo", "ready", "running", "to do", "in progress", "in bearbeitung"}
-        count = 0
-        for stack in stacks or []:
-            title = str(stack.get("title") or "").strip().lower()
-            if title not in active_titles:
+        total = 0
+        for board_id in self.runtime.boards:
+            try:
+                stacks = await self.client.get_stacks(board_id)
+            except NextcloudDeckError:
                 continue
-            for card in stack.get("cards") or []:
-                cid = str(card.get("id") or "").strip()
-                if exclude_card_id and cid == exclude_card_id:
+            for stack in stacks or []:
+                title = str(stack.get("title") or "").strip().lower()
+                if title not in active_titles:
                     continue
-                count += 1
-        return count
+                for card in stack.get("cards") or []:
+                    cid = str(card.get("id") or "").strip()
+                    if exclude_card_id and cid == exclude_card_id:
+                        continue
+                    total += 1
+        return total
 
     def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
         assigned = set(self.identity.assigned_uids(card))
@@ -1215,17 +1219,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return
 
         # WIP-Limit: Ist max_in_progress > 0 und bereits so viele ANDERE Karten
-        # in Arbeits-Spalten (todo/ready/running), wie das Limit erlaubt, wird
-        # diese Karte NICHT gestartet — der nächste Poll-Zyklus prüft erneut,
-        # sobald eine laufende Karte nach Review/Blocked/Done geschoben wurde.
+        # in Arbeits-Spalten (todo/ready/running) über ALLE Boards, wie das
+        # Limit erlaubt, wird diese Karte NICHT gestartet — der nächste
+        # Poll-Zyklus prüft erneut, sobald eine laufende Karte nach
+        # Review/Blocked/Done geschoben wurde. Die wartende Karte bekommt das
+        # Label "Waiting", damit sichtbar ist, dass der Adapter sie gesehen hat.
         if self.runtime.max_in_progress > 0:
-            active = await self._count_active_cards(board_id, exclude_card_id=card_id)
+            active = await self._count_active_cards(exclude_card_id=card_id)
             if active >= self.runtime.max_in_progress:
                 logger.info(
                     "Deck: WIP-Limit erreicht (%d >= %d) — Karte %s ('%s') noch nicht gestartet.",
                     active, self.runtime.max_in_progress, card_id, snapshot.title,
                 )
+                await self._apply_label_to_card(card_id, WAITING_LABEL_TITLE)
                 return
+
+        # Karte wird jetzt tatsächlich gestartet — ein evtl. gesetztes
+        # "Waiting"-Label (aus einem früheren WIP-Block) wieder entfernen.
+        await self._remove_label_from_card(card_id, WAITING_LABEL_TITLE)
 
         actor_id, groups, is_fallback = await self.identity.resolve_card_actor(card, last_author)
 
