@@ -182,28 +182,6 @@ HUMAN_SECTIONS = (
     "Acceptance Criteria",
 )
 
-# Agent-Sektionen (H2, werden übersetzt). Reihenfolge = Template-Layout.
-AGENT_SUBTASKS = "Subtasks"
-AGENT_REBRIEFING = "Re-Briefing"
-AGENT_RESULTS = "Results"
-AGENT_VERIFICATION = "Verification"
-
-# Sprachabhängige Anzeige-Titel der Agent-H2-Sektionen.
-_AGENT_SECTION_TITLES: Dict[str, Dict[str, str]] = {
-    "de": {
-        "subtasks": "Subtasks",
-        "rebriefing": "Re-Briefing",
-        "results": "Ergebnisse",
-        "verification": "Verifikation",
-    },
-    "en": {
-        "subtasks": "Subtasks",
-        "rebriefing": "Re-Briefing",
-        "results": "Results",
-        "verification": "Verification",
-    },
-}
-
 # Sprachabhängige Platzhalter-Texte für den Template-Körper.
 _TEMPLATE_BODIES: Dict[str, str] = {
     "de": """# Objective
@@ -277,14 +255,6 @@ def template_description(language: str = DEFAULT_TEMPLATE_LANGUAGE) -> str:
 
 # Rückwärtskompatible Alias: TEMPLATE_DESCRIPTION = deutsches Template.
 TEMPLATE_DESCRIPTION = template_description(DEFAULT_TEMPLATE_LANGUAGE)
-
-
-def agent_section_title(language: str, key: str) -> str:
-    """Übersetzter H2-Titel einer Agent-Sektion (z. B. 'results' → 'Ergebnisse')."""
-    lang = (language or DEFAULT_TEMPLATE_LANGUAGE).strip().lower()
-    if lang not in _AGENT_SECTION_TITLES:
-        lang = DEFAULT_TEMPLATE_LANGUAGE
-    return _AGENT_SECTION_TITLES[lang].get(key, key)
 
 
 # Markierungen, an denen eine leere/unausgefüllte Karte erkannt wird (Minimum).
