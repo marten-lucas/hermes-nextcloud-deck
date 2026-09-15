@@ -811,7 +811,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         # Zusammenbauen: Mensch-Teil + Marker + neuer Agent-Teil.
         marker_line = f"# {AGENT_WORKSPACE_MARKER}"
-        if human_part:
+        if old_agent is None and human_part:
+            # Kein Agent-Workspace-Marker vorhanden (Alt-Karte im alten Template):
+            # Marker explizit einfügen, damit Folge-Updates den Agent-Teil
+            # sauber finden und ersetzen können statt erneut anzuhängen.
+            new_description = f"{human_part.rstrip()}\n\n{marker_line}\n\n{new_agent}".rstrip()
+        elif human_part:
             # human_part enthält bereits die Marker-Zeile (aus split_agent_workspace).
             new_description = f"{human_part.rstrip()}\n\n{new_agent}".rstrip()
         else:
