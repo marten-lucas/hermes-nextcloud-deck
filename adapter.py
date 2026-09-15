@@ -945,7 +945,17 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             color = "317CCC"
             if canonical_key and canonical_key in FRIENDLY_LABELS:
                 color = FRIENDLY_LABELS[canonical_key][1]
-            new_lbl = await self.client.create_board_label(board_id, board_title, color=color)
+            try:
+                new_lbl = await self.client.create_board_label(board_id, board_title, color=color)
+            except NextcloudDeckError as exc:
+                # Z. B. HTTP 403: Der Bot-User hat nur permissionEdit (nicht
+                # permissionManage) und darf keine Board-Labels anlegen. Das darf
+                # den Poll-Zyklus NICHT crashen — sauber als Fehlschlag melden.
+                logger.warning(
+                    "Deck: Konnte Label '%s' auf Board %s nicht anlegen (%s) — Label-Zuweisung übersprungen.",
+                    board_title, board_id, exc,
+                )
+                return False, str(exc)
             if new_lbl and new_lbl.get("id"):
                 target_label_id = new_lbl["id"]
 
