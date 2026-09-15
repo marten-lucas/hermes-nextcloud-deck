@@ -17,6 +17,8 @@ try:
     from .workflow import (
         LABEL_PREFIX_PHASE,
         PHASE_PLAN,
+        PHASE_EXECUTE,
+        APPROVAL_APPROVED,
         build_capabilities_prompt,
         canonical_label_key,
         check_agent_label_gate,
@@ -33,6 +35,7 @@ try:
         missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
+        STATUS_RUNNING,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -52,6 +55,8 @@ except ImportError:  # direct test/import
     from workflow import (
         LABEL_PREFIX_PHASE,
         PHASE_PLAN,
+        PHASE_EXECUTE,
+        APPROVAL_APPROVED,
         build_capabilities_prompt,
         canonical_label_key,
         check_agent_label_gate,
@@ -68,6 +73,7 @@ except ImportError:  # direct test/import
         missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
+        STATUS_RUNNING,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -1322,6 +1328,35 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     logger.info("Deck: Karte %s: 'hermes/phase:plan' automatisch gesetzt.", card_id)
             except Exception as exc:
                 logger.debug("Deck: Auto-Set phase:plan fehlgeschlagen: %s", exc)
+
+        # Phase-Auto-Transition: Liegt eine menschliche Freigabe vor, die Karte
+        # sich aber noch in 'plan' befindet, vollzieht der ADAPTER (nicht der
+        # Agent) den Wechsel nach 'execute': Label phase:plan entfernen,
+        # phase:execute setzen und die Karte nach 'running' schieben. Das macht
+        # den aktiven Bearbeitungsstatus sofort im Deck-UI sichtbar (🚀 In
+        # Umsetzung + Spalte Running) und stellt sicher, dass der Agent ab dem
+        # nächsten Lauf den Execute-Prompt statt des Plan-Prompts bekommt.
+        # Loop-sicher: nach dem Wechsel trägt die Karte kein phase:plan mehr,
+        # die Re-Baseline übernimmt den neuen Zustand.
+        if (
+            approval == APPROVAL_APPROVED
+            and phase == PHASE_PLAN
+        ):
+            try:
+                applied_phase, _ = await self._apply_label_to_card(card_id, f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}")
+                if applied_phase:
+                    await self._remove_label_from_card(card_id, f"{LABEL_PREFIX_PHASE}{PHASE_PLAN}")
+                    logger.info(
+                        "Deck: Karte %s: Freigabe liegt vor → Phase auf 'execute' gewechselt (🚀 In Umsetzung).",
+                        card_id,
+                    )
+                    # Karte in die aktive Spalte schieben, sofern sie noch nicht
+                    # dort liegt (Running/Ready/In Bearbeitung).
+                    await self._move_card_to_status(card_id, STATUS_RUNNING)
+                    # Phase-Variable für den aktuellen Prompt aktualisieren
+                    phase = PHASE_EXECUTE
+            except Exception as exc:
+                logger.debug("Deck: Auto-Transition plan→execute fehlgeschlagen: %s", exc)
 
         subtask_progress = parse_subtasks(snapshot.description)
         capabilities_prompt = build_capabilities_prompt(
