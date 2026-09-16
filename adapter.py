@@ -36,6 +36,7 @@ try:
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         STATUS_RUNNING,
+        STATUS_BLOCKED,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -74,6 +75,7 @@ except ImportError:  # direct test/import
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         STATUS_RUNNING,
+        STATUS_BLOCKED,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -1416,6 +1418,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             user_name=actor_id,
         )
         result = None
+        run_error: Optional[str] = None
         workflow_ctx = DeckWorkflowContext(
             board_id=str(board_id),
             card_id=str(card_id),
@@ -1433,10 +1436,28 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 result = self.handle_message(event)
             if asyncio.iscoroutine(result):
                 await result
+        except Exception as exc:
+            run_error = str(exc)
+            logger.warning(
+                "Deck: Agent-Run für Karte %s schlug fehl: %s", card_id, exc
+            )
         finally:
             current_deck_context.reset(token)
             action_count = current_deck_action_count.get()
             current_deck_action_count.reset(action_token)
+
+        # Auto-Block bei Run-Fehler: Produziert der Agent keine verwertbare
+        # strukturelle Änderung (deck_card_action) und signalisiert die Antwort
+        # einen Token-Limit-/Fehlschlag, verschiebt der ADAPTER die Karte nach
+        # 'blocked'. Sonst würde eine feststeckende Karte dauerhaft in Running
+        # hängen und das globale WIP-Limit blockieren (nächste Karte bleibt
+        # 'Waiting'). Loop-sicher: nach dem Auto-Block wird die Dedup-Baseline
+        # unten neu gesetzt → kein Selbst-Trigger.
+        if run_error is not None or (
+            action_count == 0 and self._run_has_failure_signal(result)
+        ):
+            await self._auto_block_card(card_id)
+            return
 
         # Diagnose: Hat der Agent den Lauf ohne deck_card_action beendet, obwohl
         # die Phase strukturelle Änderungen erwarten würde? Unsichtbares
@@ -1454,6 +1475,61 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # Labels/Description geändert haben — diese Änderungen sollen NICHT als
         # neuer Trigger wirken, ein späterer menschenseitiger Wechsel aber schon.
         await self._rebaseline_card(board_id, stack_id, card_id)
+
+    _RUN_FAILURE_MARKERS = (
+        "no visible answer",
+        "output-token limit",
+        "output token limit",
+        "max_tokens",
+        "hit its output-token",
+        "reasoning consumed",
+    )
+
+    @classmethod
+    def _run_has_failure_signal(cls, result: Any) -> bool:
+        """Erkennt Fehlschlag-Signale im Run-Ergebnis.
+
+        Prüft den Text des Ergebnisses auf bekannte Token-Limit-/Fehler-Marker
+        (z. B. „No visible answer was produced ... output-token limit"). Gibt
+        True zurück, wenn der Run offensichtlich ohne verwertbare Antwort
+        gescheitert ist.
+        """
+        text = ""
+        if isinstance(result, str):
+            text = result
+        elif isinstance(result, dict):
+            text = str(result.get("text") or result.get("content") or result.get("error") or "")
+        else:
+            text = str(result or "")
+        if not text:
+            return False
+        low = text.lower()
+        return any(m in low for m in cls._RUN_FAILURE_MARKERS)
+
+    async def _auto_block_card(self, card_id: str) -> None:
+        """Verschiebt eine fehlgeschlagene Karte nach 'blocked' + Kommentar.
+
+        Wird vom Adapter (nicht vom Agenten) ausgelöst, wenn ein Run ohne
+        verwertbare strukturelle Änderung endete oder eine Exception warf. Gibt
+        den WIP-Platz frei, sodass die nächste wartende Karte starten kann.
+        Best-effort: Fehler beim Move/Kommentar werden geloggt, niemals geworfen.
+        """
+        try:
+            moved, err = await self._move_card_to_status(card_id, STATUS_BLOCKED)
+            if moved:
+                logger.info("Deck: Karte %s automatisch nach 'blocked' verschoben (Run-Fehler).", card_id)
+            else:
+                logger.warning("Deck: Auto-Block für Karte %s fehlgeschlagen: %s", card_id, err)
+        except Exception as exc:
+            logger.warning("Deck: Auto-Block für Karte %s schlug fehl: %s", card_id, exc)
+        try:
+            await self.client.add_comment(
+                card_id,
+                "🤖 AUTO-BLOCKED: Der Agent-Run konnte keine verwertbare Antwort erzeugen "
+                "(Token-Limit oder interner Fehler). Bitte prüfen und ggf. Reasoning anpassen.",
+            )
+        except Exception as exc:
+            logger.warning("Deck: Auto-Block-Kommentar für Karte %s fehlgeschlagen: %s", card_id, exc)
 
     async def _rebaseline_card(self, board_id: str, stack_id: str, card_id: str) -> None:
         """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu."""

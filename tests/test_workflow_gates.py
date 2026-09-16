@@ -325,6 +325,24 @@ class TestWorkflowLogic(unittest.TestCase):
         self.assertEqual(progress.total, 2)
         self.assertEqual(progress.completed, 1)
 
+    def test_run_failure_signal_detection(self):
+        from adapter import NextcloudDeckPlatform as NDP
+
+        # Token-Limit-Fehlertext → erkannt
+        limit_text = (
+            "🚫 **Fehler**\n\n⚠️ **No visible answer was produced.** "
+            "The model hit its output-token limit on every continuation attempt."
+        )
+        self.assertTrue(NDP._run_has_failure_signal(limit_text))
+        self.assertTrue(NDP._run_has_failure_signal("reasoning consumed the entire budget"))
+        self.assertTrue(NDP._run_has_failure_signal({"error": "max_tokens exceeded"}))
+
+        # Normale Antwort → nicht erkannt
+        self.assertFalse(NDP._run_has_failure_signal("Die Seite wurde erfolgreich angelegt."))
+        self.assertFalse(NDP._run_has_failure_signal(None))
+        self.assertFalse(NDP._run_has_failure_signal(""))
+        self.assertFalse(NDP._run_has_failure_signal({}))
+
     def test_is_backlog_stack_by_title_and_config(self):
         self.assertTrue(is_backlog_stack({"title": "Backlog"}))
         self.assertTrue(is_backlog_stack({"title": "Ideen"}))
