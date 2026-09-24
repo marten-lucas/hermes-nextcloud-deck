@@ -620,6 +620,11 @@ def build_capabilities_prompt(
         "der Karte — sie bleibt in ihrer Spalte liegen und dein Plan geht verloren.",
         "Nutze das Tool in jedem Lauf, der die Karte strukturell weiterbewegt.",
         "",
+        "🌐 **UMGEBUNG / HOSTS:** Hostnamen und URLs rätst du NIE selbst.",
+        "Validiere jeden Host/Service immer über die NPM-/Proxy-Konfiguration",
+        "(npm-mcp), bevor du ihn verwendest. Unbekannte Endpunkte erfragst du",
+        "statt sie zu erfinden.",
+        "",
     ]
 
     if norm_phase == PHASE_PLAN:
@@ -659,6 +664,10 @@ def build_capabilities_prompt(
             "- Fülle beim Fortschritt:",
             "  * '## Ergebnisse': Links/Verweise auf die erstellten Ergebnisse.",
             "  * '## Verifikation': wie die Umsetzung verifiziert wurde.",
+            "- **KOMPAKTER FORTSCHRITT:** Schreibe Zwischenfortschritt in '## Ergebnisse'",
+            "  der Karten-Beschreibung (per deck_card_action) statt in viele Chat-Kommentare.",
+            "  Kommentare NUR für: Blockaden, Rückfragen oder abgeschlossene Meilensteine —",
+            "  nicht für jeden einzelnen Arbeitsschritt.",
             "- **WICHTIG (Anti-Halluzination/Sicherheit):**",
             "  * Erfinde den Plan bei Problemen NICHT eigenmächtig neu!",
             "  * Wenn ein Teilschritt fehlschlägt oder der Plan nicht passt: Setze Status auf 'blocked'",
