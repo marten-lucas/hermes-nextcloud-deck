@@ -10,6 +10,12 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# Deck-API hat ein hartes Kommentar-Limit von 1000 Zeichen
+# (empirisch verifiziert 2026-09-26: HTTP 400 "Message exceeds allowed
+# character limit of 1000"). Der Wert ist NICHT willkürlich, sondern die
+# tatsächliche Obergrenze der Deck-REST-API.
+DECK_COMMENT_MAX_CHARS = 1000
+
 
 class NextcloudDeckError(RuntimeError):
     pass
@@ -139,14 +145,48 @@ class NextcloudDeckClient:
         data = await self._request("GET", f"cards/{card_id}/comments", use_ocs=True)
         return data if isinstance(data, list) else []
 
+    @staticmethod
+    def _split_comment(text: str, limit: int) -> List[str]:
+        """Teilt einen langen Text in Blöcke <= limit (an Zeilen-/Wortgrenzen).
+
+        Verhindert, dass ein Kommentar mitten im Wort abgeschnitten wird:
+        Es wird bevorzugt an einem Zeilenumbruch, sonst an einem Leerzeichen
+        getrennt. Nur wenn beides fehlt, wird hart am Limit geschnitten.
+        """
+        text = text or ""
+        if len(text) <= limit:
+            return [text]
+        chunks: List[str] = []
+        while len(text) > limit:
+            cut = text.rfind("\n", 0, limit + 1)
+            if cut <= 0:
+                cut = text.rfind(" ", 0, limit + 1)
+            if cut <= 0:
+                cut = limit
+            chunks.append(text[:cut].rstrip())
+            text = text[cut:].lstrip()
+        if text:
+            chunks.append(text)
+        return chunks
+
     async def add_comment(self, card_id: str | int, message: str) -> Optional[Dict[str, Any]]:
-        data = await self._request(
-            "POST",
-            f"cards/{card_id}/comments",
-            use_ocs=True,
-            json={"message": str(message)[:1000]},
-        )
-        return data if isinstance(data, dict) else None
+        """Postet einen Kommentar. Überlange Inhalte werden in mehrere
+        Kommentare bis zur Deck-Obergrenze (1000 Zeichen) aufgeteilt, statt
+        stillschweigend abgeschnitten zu werden."""
+        text = str(message or "")
+        if not text:
+            return None
+        last: Optional[Dict[str, Any]] = None
+        for chunk in self._split_comment(text, DECK_COMMENT_MAX_CHARS):
+            data = await self._request(
+                "POST",
+                f"cards/{card_id}/comments",
+                use_ocs=True,
+                json={"message": chunk},
+            )
+            if isinstance(data, dict):
+                last = data
+        return last
 
     async def create_card(
         self,

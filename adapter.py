@@ -19,6 +19,7 @@ try:
         PHASE_PLAN,
         PHASE_EXECUTE,
         APPROVAL_APPROVED,
+        APPROVAL_REQUIRED,
         build_capabilities_prompt,
         canonical_label_key,
         check_agent_label_gate,
@@ -58,6 +59,7 @@ except ImportError:  # direct test/import
         PHASE_PLAN,
         PHASE_EXECUTE,
         APPROVAL_APPROVED,
+        APPROVAL_REQUIRED,
         build_capabilities_prompt,
         canonical_label_key,
         check_agent_label_gate,
@@ -882,6 +884,21 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                         card_id, target_stack_id, actual_stack_id,
                     )
                     return False, f"Card {card_id} did not move to stack {target_stack_id} (silent API failure)"
+            # Konzept 2 (I3): Ein Move nach 'review' bedeutet "wartet auf
+            # (erneute) Freigabe". Deterministsch den Alt-Zustand bereinigen:
+            # phase:execute entfernen (Karte ist nicht mehr aktiv in Umsetzung)
+            # und approval:approved entfernen + approval:required setzen — die
+            # alte Freigabe ist verbraucht, es wird eine neue angefordert.
+            # Dadurch trägt eine Review-Karte nie mehr "🚀 In Umsetzung" oder
+            # "✔️ Freigabe erteilt" zusätzlich zum "⌛ Freigabe nötig".
+            status_norm = str(status_key or "").strip().lower()
+            if status_norm == STATUS_REVIEW:
+                try:
+                    await self._remove_label_from_card(card_id, f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}")
+                    await self._apply_label_to_card(card_id, f"approval:{APPROVAL_REQUIRED}")
+                except Exception as exc:
+                    logger.debug("Deck: Review-Normalisierung für Karte %s fehlgeschlagen: %s", card_id, exc)
+
             logger.info(
                 "Deck: Karte %s nach Stack %s ('%s') verschoben und verifiziert.",
                 card_id, target_stack_id, status_key,
@@ -890,6 +907,101 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         except NextcloudDeckError as exc:
             logger.warning("Deck card move failed for card %s: %s", card_id, exc)
             return False, str(exc)
+
+    # ------------------------------------------------------------------
+    # Label-Gruppen-Invarianten (Konzept 2).
+    # Zwei Gruppen sind jeweils gegenseitig exklusiv (XOR):
+    #   - Phase:     phase:plan  XOR  phase:execute
+    #   - Approval:  approval:required  XOR  approval:approved
+    # Es gibt bewusst NUR ein Approval-Label — ob damit ein Plan oder ein
+    # Ergebnis freigegeben wird, ergibt sich aus dem Kontext/der Phase
+    # (plan -> Plan-Freigabe, execute/fertig -> Ergebnis-Abnahme).
+    # Es wird deshalb KEIN separates "acceptance"-Label verwendet.
+    # ------------------------------------------------------------------
+    _LABEL_XOR_GROUPS = (
+        (f"{LABEL_PREFIX_PHASE}{PHASE_PLAN}", f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}"),
+        (f"approval:{APPROVAL_REQUIRED}", f"approval:{APPROVAL_APPROVED}"),
+    )
+
+    def _xor_group_of(self, canonical_key: Optional[str]) -> Optional[tuple[str, str]]:
+        """Liefert die XOR-Gruppe (Paar kanonischer Keys), zu der ``canonical_key``
+        gehört, oder None, wenn der Key keiner Gruppe angehört."""
+        if not canonical_key:
+            return None
+        for group in self._LABEL_XOR_GROUPS:
+            if canonical_key in group:
+                return group
+        return None
+
+    async def _remove_xor_siblings(
+        self,
+        card_id: str,
+        canonical_key: str,
+        except_sibling: Optional[str] = None,
+    ) -> None:
+        """Entfernt die Schwester-Labels derselben XOR-Gruppe von einer Karte.
+
+        Setzt man z. B. ``phase:execute``, wird ``phase:plan`` entfernt; setzt
+        man ``approval:required``, wird ``approval:approved`` entfernt. Dadurch
+        kann auf einer Karte nie mehr als EIN Label pro Gruppe liegen — das
+        Label-Chaos (🚀 + ⌛ + ✔️ zugleich) ist strukturell ausgeschlossen.
+        Best-effort: Fehler werden geloggt, niemals geworfen.
+        """
+        group = self._xor_group_of(canonical_key)
+        if not group:
+            return
+        for sibling in group:
+            if sibling == canonical_key:
+                continue
+            if except_sibling and sibling == except_sibling:
+                continue
+            try:
+                removed = await self._remove_label_from_card(card_id, sibling)
+                if removed:
+                    logger.info(
+                        "Deck: XOR-Invariante — '%s' entfernt (Konflikt mit '%s') auf Karte %s.",
+                        sibling, canonical_key, card_id,
+                    )
+            except Exception as exc:
+                logger.debug("Deck: XOR-Entfernung '%s' auf Karte %s fehlgeschlagen: %s", sibling, card_id, exc)
+
+    async def _normalize_label_conflicts(self, card_id: str) -> None:
+        """Poll-seitige Normalisierung (Konzept 2, Punkt 3): erkennt und bereinigt
+        widersprüchliche Label-Paare auf einer Karte IDEMPOTENT, ohne auf einen
+        Agent-Lauf warten zu müssen.
+
+        Regel (Best-effort, deterministisch): Der aktuelle/menschliche Zustand
+        gewinnt. Bei einem Konflikt in der Phase-Gruppe gewinnt ``execute``;
+        bei der Approval-Gruppe gewinnt ``required`` (eine erneute Freigabe-
+        Anforderung invalidiert die alte Freigabe).
+        """
+        location = await self._locate_card(card_id)
+        if location is None:
+            return
+        board_id, stack_id = location
+        try:
+            current_card = await self.client.get_card(board_id, stack_id, card_id)
+        except NextcloudDeckError:
+            return
+        if not current_card:
+            return
+        label_keys = set()
+        for lbl in (current_card.get("labels") or []):
+            key = canonical_label_key(str(lbl.get("title") or ""))
+            if key:
+                label_keys.add(key)
+        # Phase: execute gewinnt gegen plan
+        phase_execute = f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}"
+        phase_plan = f"{LABEL_PREFIX_PHASE}{PHASE_PLAN}"
+        if phase_execute in label_keys and phase_plan in label_keys:
+            await self._remove_label_from_card(card_id, phase_plan)
+            logger.info("Deck: Label-Konflikt bereinigt — 'phase:plan' entfernt (execute gewinnt) auf Karte %s.", card_id)
+        # Approval: required gewinnt gegen approved
+        approval_required = f"approval:{APPROVAL_REQUIRED}"
+        approval_approved = f"approval:{APPROVAL_APPROVED}"
+        if approval_required in label_keys and approval_approved in label_keys:
+            await self._remove_label_from_card(card_id, approval_approved)
+            logger.info("Deck: Label-Konflikt bereinigt — 'approval:approved' entfernt (required gewinnt) auf Karte %s.", card_id)
 
     async def _apply_label_to_card(self, card_id: str, label_title: str) -> tuple[bool, Optional[str]]:
         """Weist der Karte ein Label zu (erstellt das Label bei Bedarf auf dem Board).
@@ -966,13 +1078,21 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
         try:
             res = await self.client.assign_label(board_id, stack_id, card_id, int(target_label_id))
-            return res is not None, None
         except NextcloudDeckError as exc:
             # Wenn bereits zugewiesen, als Erfolg werten
             if "already assigned" in str(exc).lower():
                 return True, None
             logger.warning("Deck assign_label failed for card %s: %s", card_id, exc)
             return False, str(exc)
+
+        # XOR-Invariante (Konzept 2): Nach erfolgreicher Zuweisung die
+        # Schwester-Labels derselben Gruppe entfernen, damit z. B. beim Setzen
+        # von 'approval:required' ein altes 'approval:approved' sofort
+        # verschwindet — kein Label-Chaos möglich.
+        if canonical_key:
+            await self._remove_xor_siblings(card_id, canonical_key)
+
+        return res is not None, None
 
     async def _remove_label_from_card(self, card_id: str, label_title: str) -> bool:
         """Entfernt ein Label von der Karte (Friendly-Titel oder kanonischer Key)."""
@@ -1280,6 +1400,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
                 return
 
+        # Konzept 2 (Punkt 3): Label-Konflikte idempotent bereinigen, sobald die
+        # Karte tatsächlich (re-)verarbeitet wird — bevor der Agent läuft. So
+        # wird z. B. ein gleichzeitiges "phase:plan"+"phase:execute" oder
+        # "approval:required"+"approval:approved" deterministisch aufgelöst,
+        # ohne auf das LLM-Verhalten zu vertrauen.
+        await self._normalize_label_conflicts(card_id)
+
         # Karte wird jetzt tatsächlich gestartet — ein evtl. gesetztes
         # "Waiting"-Label (aus einem früheren WIP-Block) wieder entfernen.
         await self._remove_label_from_card(card_id, friendly_label_title("waiting"))
@@ -1453,9 +1580,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # hängen und das globale WIP-Limit blockieren (nächste Karte bleibt
         # 'Waiting'). Loop-sicher: nach dem Auto-Block wird die Dedup-Baseline
         # unten neu gesetzt → kein Selbst-Trigger.
+        #
+        # Konzept 1: Zusätzlich wird INHALTLICH registriert, wenn der Agent ein
+        # Block-Intent-Signal produziert (z. B. "🤖 BLOCKED" / "PLAN CHANGE
+        # REQUESTED" im Ergebnis oder Kommentar), ohne dass er die Karte selbst
+        # strukturell nach 'blocked' verschoben hat. Auch dann übernimmt der
+        # ADAPTER den deterministischen Block — unabhängig vom LLM-Verhalten.
+        block_intent = self._run_has_block_intent(result)
         if run_error is not None or (
             action_count == 0 and self._run_has_failure_signal(result)
-        ):
+        ) or block_intent:
             await self._auto_block_card(card_id)
             return
 
@@ -1485,6 +1619,23 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         "reasoning consumed",
     )
 
+    # Konzept 1: Inhaltliche Block-Intent-Signale des Agenten. Produziert der
+    # Agent eine dieser Phrasen (im Ergebnis oder als Kommentar), ohne die Karte
+    # selbst nach 'blocked' zu verschieben, übernimmt der Adapter den Block
+    # deterministisch.
+    _BLOCK_INTENT_MARKERS = (
+        "🤖 blocked",
+        "plan change requested",
+        "blocked —",
+        "blocked --",
+        "nicht lösbar",
+        "nicht loesbar",
+        "not possible",
+        "hard blocker",
+        "can't proceed",
+        "cannot proceed",
+    )
+
     @classmethod
     def _run_has_failure_signal(cls, result: Any) -> bool:
         """Erkennt Fehlschlag-Signale im Run-Ergebnis.
@@ -1505,6 +1656,27 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return False
         low = text.lower()
         return any(m in low for m in cls._RUN_FAILURE_MARKERS)
+
+    @classmethod
+    def _run_has_block_intent(cls, result: Any) -> bool:
+        """Erkennt ein inhaltliches Block-Intent-Signal des Agenten (Konzept 1).
+
+        Anders als ``_run_has_failure_signal`` (technischer Token-/Fehler-Marker)
+        prüft dies auf ein semantisches „ich kann das nicht lösen / Plan-Change
+        nötig"-Signal. Rückgabe True = der Adapter soll die Karte nach 'blocked'
+        verschieben, sofern der Agent es nicht bereits selbst getan hat.
+        """
+        text = ""
+        if isinstance(result, str):
+            text = result
+        elif isinstance(result, dict):
+            text = str(result.get("text") or result.get("content") or result.get("error") or "")
+        else:
+            text = str(result or "")
+        if not text:
+            return False
+        low = text.lower()
+        return any(m in low for m in cls._BLOCK_INTENT_MARKERS)
 
     async def _auto_block_card(self, card_id: str) -> None:
         """Verschiebt eine fehlgeschlagene Karte nach 'blocked' + Kommentar.
