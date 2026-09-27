@@ -675,6 +675,12 @@ def build_capabilities_prompt(
             "- Nach erfolgreicher Abarbeitung aller Subtasks und Verifikation:",
             "  * Verschiebe nach 'review' (NICHT nach 'done' — der Mensch nimmt ab!)",
             f"  * Setze '{lbl_approval}' für die Abnahme.",
+            "- **NEUE MENSCHLICHE ENTSCHEIDUNG NÖTIG:** Brauchst du eine neue menschliche",
+            "  Entscheidung (z. B. Freigabe für einen HIGH-RISK-Teil, oder du bist mit dem",
+            "  sicher Umsetzbaren fertig und wartest auf GO), verschiebe die Karte IMMER per",
+            f"  `deck_card_action` mit `target_status: \"review\"` und setze '{lbl_approval}'.",
+            "  NIEMALS nur mit einem Text-Kommentar — ein reiner Kommentar lässt die Karte",
+            "  in 'running' hängen und blockiert den gesamten Workflow (WIP-Limit).",
         ])
 
     if norm_risk in {"high", "critical"}:

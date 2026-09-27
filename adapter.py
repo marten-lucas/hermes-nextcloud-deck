@@ -1222,6 +1222,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
         return self.runtime.boards.get(board_id)
 
+    # Aktive Arbeits-Spalten (für WIP-Zählung und WIP-Gate). Als Modul-/
+    # Klassenkonstante definiert, damit _count_active_cards und der WIP-Guard
+    # in _process_card dieselbe Definition nutzen (keine Drift).
+    _ACTIVE_STACK_TITLES = {
+        "todo", "ready", "running", "to do", "in progress", "in bearbeitung",
+    }
+
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
         """Zählt Karten in Arbeits-Spalten (todo/ready/running) über ALLE Boards.
 
@@ -1233,7 +1240,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         """
         if not self.runtime.max_in_progress:
             return 0
-        active_titles = {"todo", "ready", "running", "to do", "in progress", "in bearbeitung"}
         total = 0
         for board_id in self.runtime.boards:
             try:
@@ -1242,7 +1248,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 continue
             for stack in stacks or []:
                 title = str(stack.get("title") or "").strip().lower()
-                if title not in active_titles:
+                if title not in self._ACTIVE_STACK_TITLES:
                     continue
                 for card in stack.get("cards") or []:
                     cid = str(card.get("id") or "").strip()
@@ -1390,7 +1396,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # Poll-Zyklus prüft erneut, sobald eine laufende Karte nach
         # Review/Blocked/Done geschoben wurde. Die wartende Karte bekommt das
         # Label "Waiting", damit sichtbar ist, dass der Adapter sie gesehen hat.
-        if self.runtime.max_in_progress > 0:
+        # Fix 2a: Das WIP-Limit gilt NUR für Karten, die selbst in einer aktiven
+        # Arbeits-Spalte (todo/ready/running) liegen. Karten in Review/Blocked/
+        # Done warten auf den Menschen oder sind beendet — sie dürfen NICHT mit
+        # 'Waiting' belegt und NICHT gegen das WIP-Limit gesperrt werden, sonst
+        # entsteht ein endloser WIP-Spam (siehe Karte 117 in Review).
+        current_stack_title = str(stack.get("title") or "").strip().lower()
+        if (
+            self.runtime.max_in_progress > 0
+            and current_stack_title in self._ACTIVE_STACK_TITLES
+        ):
             active = await self._count_active_cards(exclude_card_id=card_id)
             if active >= self.runtime.max_in_progress:
                 logger.info(
@@ -1398,6 +1413,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     active, self.runtime.max_in_progress, card_id, snapshot.title,
                 )
                 await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
+                # Fix 2b: Den Zustand als "gesehen" markieren, damit diese Karte
+                # nicht in jedem Poll-Zyklus erneut getriggert wird (sonst
+                # Dauer-Spam alle poll_interval Sekunden).
+                self.state.mark_processed(snapshot)
                 return
 
         # Konzept 2 (Punkt 3): Label-Konflikte idempotent bereinigen, sobald die
@@ -1593,6 +1612,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             await self._auto_block_card(card_id)
             return
 
+        # Fix 1 (Adapter-Fallback): Ein Execute-Turn, der OHNE strukturelle
+        # Änderung endet, aber ein "warte auf menschliche Entscheidung"-Signal
+        # trägt, wird deterministisch nach 'review' verschoben — statt ewig in
+        # 'running' zu hängen und den WIP-Slot zu blockieren (der 119-Bug).
+        if (
+            phase == PHASE_EXECUTE
+            and action_count == 0
+            and self._run_has_review_intent(result)
+        ):
+            moved, _ = await self._move_card_to_status(card_id, STATUS_REVIEW)
+            if moved:
+                logger.info(
+                    "Deck: Karte %s nach 'review' verschoben — Agent wartet auf neue menschliche Freigabe (Review-Intent erkannt).",
+                    card_id,
+                )
+            await self._rebaseline_card(board_id, stack_id, card_id)
+            return
+
         # Diagnose: Hat der Agent den Lauf ohne deck_card_action beendet, obwohl
         # die Phase strukturelle Änderungen erwarten würde? Unsichtbares
         # "nur Kommentar"-Muster frühzeitig sichtbar machen.
@@ -1636,6 +1673,31 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         "cannot proceed",
     )
 
+    # Fix 1: Review-Intent-Signale. Der Agent pausiert und delegiert die nächste
+    # Entscheidung an den Menschen („warte auf deine Freigabe", „du sagst mir…").
+    # Erkennt der Adapter ein solches Signal in einem Execute-Turn ohne
+    # strukturelle Änderung, verschiebt er die Karte deterministisch nach 'review'.
+    _REVIEW_INTENT_MARKERS = (
+        "warte auf deine",
+        "warten auf deine",
+        "waiting for your",
+        "awaiting your",
+        "waiting on your",
+        "brauche deine",
+        "need your",
+        "deine freigabe",
+        "deine bestätigung",
+        "deine entscheidung",
+        "your approval",
+        "your confirmation",
+        "your decision",
+        "du sagst",
+        "bitte bestätig",
+        "please confirm",
+        "halte dann an",
+        "halt an",
+    )
+
     @classmethod
     def _run_has_failure_signal(cls, result: Any) -> bool:
         """Erkennt Fehlschlag-Signale im Run-Ergebnis.
@@ -1656,6 +1718,27 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return False
         low = text.lower()
         return any(m in low for m in cls._RUN_FAILURE_MARKERS)
+
+    @classmethod
+    def _run_has_review_intent(cls, result: Any) -> bool:
+        """Erkennt ein Review-Intent-Signal des Agenten (Fix 1).
+
+        Prüft auf semantische Muster „ich pausiere und warte auf eine menschliche
+        Entscheidung/Freigabe". Wird genutzt, um eine Karte ohne strukturelle
+        Änderung deterministisch nach 'review' zu verschieben statt sie in
+        'running' hängen zu lassen.
+        """
+        text = ""
+        if isinstance(result, str):
+            text = result
+        elif isinstance(result, dict):
+            text = str(result.get("text") or result.get("content") or result.get("error") or "")
+        else:
+            text = str(result or "")
+        if not text:
+            return False
+        low = text.lower()
+        return any(m in low for m in cls._REVIEW_INTENT_MARKERS)
 
     @classmethod
     def _run_has_block_intent(cls, result: Any) -> bool:
