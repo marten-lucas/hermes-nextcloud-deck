@@ -2097,6 +2097,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not suffix:
             return
         try:
+            # Presence auf "busy" setzen — das Gateway ruft mark_turn_started/
+            # finished NICHT auf, daher ist send_typing der einzige zuverlässige
+            # Lifecycle-Hook während eines Turns. Zusammen mit dem Custom-Status
+            # ergibt das die sichtbare "arbeitet gerade"-Präsenz.
+            await self.presence_mgr.set_presence_status("busy")
             # Karten-Label IMMER direkt aus chat_id auflösen (eigener Cache pro
             # Karte). Ein globaler _status_card_label würde bei parallelen oder
             # aufeinanderfolgenden Turns das Label der VORHERIGEN Karte zeigen.
@@ -2124,6 +2129,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         """
         try:
             await self.presence_mgr.clear_custom_status_message(force=True)
+            # Zurück auf "online" — das Gateway ruft mark_turn_finished nicht
+            # auf, daher stellt stop_typing die Presence wieder auf "online".
+            await self.presence_mgr.set_presence_status("online")
         except Exception as exc:
             logger.debug("Deck: Custom-Status beim stop_typing löschen fehlgeschlagen: %s", exc)
 
