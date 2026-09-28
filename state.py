@@ -64,6 +64,21 @@ class DeckStateManager:
         # um menschenseitige Label-Änderungen als Trigger zu erkennen — auch
         # wenn der letzte Kommentar vom Agenten selbst stammt.
         self._last_labels: Dict[str, List[str]] = {}
+        # Letzte bereits verarbeitete Kommentar-ID pro Karte. Dient dazu, beim
+        # nächsten Agent-Lauf nur die NEUEN Kommentare (id > Baseline) als
+        # Kontext zu übergeben, statt nur den allerletzten.
+        self._last_comment_ids: Dict[str, Optional[int]] = {}
+
+    def _key(self, board_id: str, card_id: str) -> str:
+        return f"{board_id}:{card_id}"
+
+    def last_processed_comment_id(self, board_id: str, card_id: str) -> Optional[int]:
+        """Liefert die letzte Kommentar-ID, die bereits verarbeitet wurde.
+
+        None = noch nie verarbeitet (erster Lauf). Kommentare mit höherer ID
+        gelten als "neu" und werden dem Agenten als Kontext übergeben.
+        """
+        return self._last_comment_ids.get(self._key(board_id, card_id))
 
     def should_process(self, snapshot: DeckCardSnapshot) -> bool:
         key = f"{snapshot.board_id}:{snapshot.card_id}"
@@ -86,6 +101,23 @@ class DeckStateManager:
         return sorted(baseline) != sorted(snapshot.labels or [])
 
     def mark_processed(self, snapshot: DeckCardSnapshot) -> None:
-        key = f"{snapshot.board_id}:{snapshot.card_id}"
+        """Vollständige Verarbeitung dokumentieren (Agent lief wirklich)."""
+        self.mark_seen(snapshot)
+        if snapshot.last_comment_id is not None:
+            try:
+                self._last_comment_ids[self._key(snapshot.board_id, snapshot.card_id)] = int(str(snapshot.last_comment_id))
+            except (ValueError, TypeError):
+                pass
+
+    def mark_seen(self, snapshot: DeckCardSnapshot) -> None:
+        """Nur Dedupe-Baseline setzen (Fingerprint + Labels), ohne die
+        Kommentar-Baseline fortzuschreiben.
+
+        Wird z. B. vom WIP-Guard genutzt: Die Karte wurde "gesehen" (kein
+        Re-Trigger-Spam), aber der Agent hat sie NICHT verarbeitet. Die neu
+        aufgelaufenen Kommentare bleiben daher als "neu" erhalten, bis der
+        Agent beim nächsten freien WIP-Slot wirklich läuft.
+        """
+        key = self._key(snapshot.board_id, snapshot.card_id)
         self._fingerprints[key] = snapshot.fingerprint()
         self._last_labels[key] = list(snapshot.labels or [])

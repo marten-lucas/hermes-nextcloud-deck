@@ -1354,6 +1354,33 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 return str(value).strip()
         return None
 
+    def _comment_id(self, comment: Dict[str, Any]) -> Optional[int]:
+        try:
+            return int(str(comment.get("id") or ""))
+        except (ValueError, TypeError):
+            return None
+
+    def _new_comments_since_baseline(
+        self, board_id: str, card_id: str, comments: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Liefert Kommentare mit ID > letzter verarbeiteter ID (aufsteigend).
+
+        Während eine Karte auf Waiting/Freigabe wartet, sammeln sich mehrere
+        menschliche Kommentare an. Diese sollen dem Agenten beim nächsten Lauf
+        ALLE als Kontext übergeben werden — nicht nur der allerletzte. Eigene
+        (Agent-)Kommentare zwischen den menschlichen werden ausgefiltert.
+        """
+        baseline = self.state.last_processed_comment_id(board_id, card_id)
+        result: List[Dict[str, Any]] = []
+        for c in comments:
+            cid = self._comment_id(c)
+            if cid is None:
+                continue
+            if baseline is not None and cid <= baseline:
+                continue
+            result.append(c)
+        return result
+
     async def _process_card(
         self,
         board: Dict[str, Any],
@@ -1473,8 +1500,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
                 # Fix 2b: Den Zustand als "gesehen" markieren, damit diese Karte
                 # nicht in jedem Poll-Zyklus erneut getriggert wird (sonst
-                # Dauer-Spam alle poll_interval Sekunden).
-                self.state.mark_processed(snapshot)
+                # Dauer-Spam alle poll_interval Sekunden). WICHTIG: mark_seen
+                # (nicht mark_processed), damit die Kommentar-Baseline NICHT
+                # fortgeschrieben wird — die während des Wartens auflaufenden
+                # Kommentare müssen dem Agenten später erhalten bleiben.
+                self.state.mark_seen(snapshot)
                 return
 
         # Konzept 2 (Punkt 3): Label-Konflikte idempotent bereinigen, sobald die
@@ -1593,7 +1623,22 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             f"{capabilities_prompt}\n\n"
             f"Beschreibung:\n{snapshot.description}"
         )
-        if last and last.get("message"):
+
+        # Neue Kommentare seit der letzten Verarbeitung (nicht nur der aller-
+        # letzte). Während eine Karte wartet (Waiting/Freigabe), sammeln sich
+        # mehrere menschliche Hinweise an — die bekommt der Agent jetzt ALLE.
+        new_comments = self._new_comments_since_baseline(board_id, card_id, comments)
+        if new_comments:
+            blocks = []
+            for c in new_comments:
+                author = self._last_comment_author(c) or "unbekannt"
+                msg = str(c.get("message") or "").strip()
+                if not msg:
+                    continue
+                blocks.append(f"[{author}]: {msg}")
+            if blocks:
+                text += "\n\nNeue Kommentare seit dem letzten Lauf:\n" + "\n\n".join(blocks)
+        elif last and last.get("message"):
             text += f"\n\nLetzter Kommentar von {last_author or 'unbekannt'}:\n{last['message']}"
 
         event = MessageEvent(
