@@ -76,6 +76,55 @@ class NextcloudDeckClient:
             path.lstrip("/"),
         )
 
+    def core_ocs_url(self, path: str) -> str:
+        """Basis-URL für generische OCS-Endpoints (z. B. user_status).
+
+        Deck-spezifische Calls laufen über ``ocs_url``
+        (``/ocs/v2.php/apps/deck/api/v1.0/``); für Nextcloud-Kern-APIs wie den
+        User-Status (``apps/user_status/api/v1/...``) wird die OCS-Wurzel
+        ``/ocs/v2.php/`` benötigt.
+        """
+        return urljoin(
+            f"{self.base_url}/ocs/v2.php/",
+            path.lstrip("/"),
+        )
+
+    async def ocs_put_core(self, path: str, payload: Dict[str, Any]) -> Any:
+        """OCS PUT gegen die OCS-Wurzel (z. B. User-Status setzen)."""
+        session = await self.ensure_session()
+        url = self.core_ocs_url(path)
+        async with session.request(
+            "PUT", url, headers=self.headers(), json=payload
+        ) as resp:
+            raw = await resp.text()
+            if resp.status >= 400:
+                raise NextcloudDeckError(
+                    f"OCS PUT {path} failed with HTTP {resp.status}: {raw[:300]}"
+                )
+            if not raw:
+                return None
+            try:
+                return self._unwrap(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                raise NextcloudDeckError(f"OCS PUT {path} returned non-JSON: {raw[:300]}") from exc
+
+    async def ocs_delete_core(self, path: str) -> Any:
+        """OCS DELETE gegen die OCS-Wurzel (z. B. User-Status löschen)."""
+        session = await self.ensure_session()
+        url = self.core_ocs_url(path)
+        async with session.request("DELETE", url, headers=self.headers()) as resp:
+            raw = await resp.text()
+            if resp.status >= 400:
+                raise NextcloudDeckError(
+                    f"OCS DELETE {path} failed with HTTP {resp.status}: {raw[:300]}"
+                )
+            if not raw:
+                return None
+            try:
+                return self._unwrap(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                raise NextcloudDeckError(f"OCS DELETE {path} returned non-JSON: {raw[:300]}") from exc
+
     @staticmethod
     def _unwrap(body: Any) -> Any:
         if isinstance(body, dict) and isinstance(body.get("ocs"), dict):

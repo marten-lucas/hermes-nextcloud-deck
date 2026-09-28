@@ -9,10 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiohttp
+
 try:
     from .client import NextcloudDeckClient, NextcloudDeckError
     from .identity import DeckIdentityResolver
     from .outbound import categorize_gateway_message
+    from .presence import DeckPresenceManager
     from .state import DeckCardSnapshot, DeckStateManager
     from .workflow import (
         LABEL_PREFIX_PHASE,
@@ -53,6 +56,7 @@ except ImportError:  # direct test/import
     from client import NextcloudDeckClient, NextcloudDeckError
     from identity import DeckIdentityResolver
     from outbound import categorize_gateway_message
+    from presence import DeckPresenceManager
     from state import DeckCardSnapshot, DeckStateManager
     from workflow import (
         LABEL_PREFIX_PHASE,
@@ -164,6 +168,8 @@ class DeckRuntimeConfig:
     backlog_format_quiet_seconds: float = BACKLOG_FORMAT_QUIET_SECONDS
     max_in_progress: int = 0
     template_language: str = DEFAULT_TEMPLATE_LANGUAGE
+    speed_enabled: bool = False
+    speed_url: str = ""
 
 
 def _load_dotenv_fallback() -> Dict[str, str]:
@@ -209,6 +215,13 @@ def _env(name: str, *fallbacks: str) -> str:
         if value:
             return value
     return ""
+
+
+def _env_bool(name: str, *fallbacks: str, default: bool = False) -> bool:
+    value = _env(name, *fallbacks).strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on", "y", "ja", "an")
 
 
 def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
@@ -293,6 +306,17 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     if template_language not in TEMPLATE_LANGUAGES:
         template_language = DEFAULT_TEMPLATE_LANGUAGE
 
+    # Live-Token-Geschwindigkeit (t/s) im User-Status. Quelle ist der Ollama
+    # Sidecar (ct101) über NPM. Standardmäßig AUS; URL ist die NPM-/speed-Location.
+    speed_enabled = bool(
+        extra.get("speed_enabled")
+        or _env_bool("NEXTCLOUD_DECK_SPEED_ENABLED", default=False)
+    )
+    speed_url = str(
+        extra.get("speed_url")
+        or _env("NEXTCLOUD_DECK_SPEED_URL")
+    ).strip().rstrip("/")
+
     boards: Dict[str, Dict[str, Any]] = {}
     raw_boards = extra.get("boards") or []
     if isinstance(raw_boards, list):
@@ -359,6 +383,8 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         backlog_format_quiet_seconds=backlog_format_quiet_seconds,
         max_in_progress=max_in_progress,
         template_language=template_language,
+        speed_enabled=speed_enabled,
+        speed_url=speed_url,
     )
 
 
@@ -401,9 +427,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             bot_aliases=self.runtime.bot_aliases,
         )
         self.state = DeckStateManager()
+        self.presence_mgr = DeckPresenceManager(self.client)
         self.destructive_patterns = compile_destructive_patterns(
             self.runtime.destructive_tool_patterns
         )
+        self._speed_session: Optional[aiohttp.ClientSession] = None
+        self._last_speed: Optional[Dict[str, Any]] = None
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -439,6 +468,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # Board-Eignung prüfen und bei Problemen laut loggen (kein Abbruch —
         # ein ungeeignetes Board darf das Gateway nicht blockieren).
         await self.check_board_suitability()
+        # Presence: Bot-User als online melden + ggf. altes Custom-Status-Reset.
+        try:
+            await self.presence_mgr.set_presence_status("online")
+        except Exception as exc:
+            logger.debug("Deck: Presence online setzen fehlgeschlagen: %s", exc)
         return True
 
     async def _call_on_gateway_loop(self, coro_factory):
@@ -560,6 +594,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        # Presence: offline setzen + Custom-Status löschen (best-effort).
+        try:
+            await self.presence_mgr.set_presence_status("offline")
+            await self.presence_mgr.clear_custom_status_message(force=True)
+        except Exception as exc:
+            logger.debug("Deck: Presence offline setzen fehlgeschlagen: %s", exc)
+        if self._speed_session and not self._speed_session.closed:
+            await self._speed_session.close()
+        self._speed_session = None
         await self.client.close()
         self._mark_disconnected()
 
@@ -1972,6 +2015,174 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 )
             except asyncio.TimeoutError:
                 pass
+
+    # ── User-Status-Contract (wie Talk-Plugin) ─────────────────────────
+    # Der Hermes-Gateway ruft diese Methoden während eines Turns auf, sofern
+    # sie existieren: mark_turn_started/finished (busy), send_or_update_status
+    # (Custom-Status mit Icon), send_typing/stop_typing sind für Deck bewusst
+    # No-Ops (Deck hat kein Typing-Konzept). Da Talk und Deck das Modell nie
+    # gleichzeitig nutzen, ist der User-Status global eindeutig.
+
+    async def mark_turn_started(self) -> None:
+        """Presence-Marker: ein Turn ist aktiv (Referenzgezählt → busy)."""
+        try:
+            await self.presence_mgr.set_busy()
+        except Exception as exc:
+            logger.debug("Deck: set_busy fehlgeschlagen: %s", exc)
+
+    async def mark_turn_finished(self) -> None:
+        """Presence-Marker: Turn beendet — zurück auf online, wenn letzter."""
+        try:
+            await self.presence_mgr.clear_busy()
+        except Exception as exc:
+            logger.debug("Deck: clear_busy fehlgeschlagen: %s", exc)
+
+    async def send_or_update_status(
+        self,
+        chat_id: str,
+        status_key: str,
+        content: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Status-Contract: Fortschritt als Custom-Presence statt Kartentext.
+
+        Der Karten-Bezug (Nummer + Titel) wird zusätzlich in den Status-Text
+        eingefügt, damit beim Hover sichtbar ist, WELCHE Karte gerade arbeitet.
+        """
+        del metadata
+        message, icon = self._map_progress_status(status_key, content)
+        if message:
+            card_label = await self._card_status_label(chat_id)
+            if card_label:
+                message = f"{card_label} · {message}"
+            try:
+                await self.presence_mgr.set_custom_status_message(message, icon)
+            except Exception as exc:
+                logger.debug("Deck: Custom-Status setzen fehlgeschlagen: %s", exc)
+        return SendResult(success=True)
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """Typing-Heartbeat: aktualisiert bei aktivem Speed-Tracking den Status
+        mit der Live-Geschwindigkeit (Sidecar) — Deck hat sonst kein Typing."""
+        del metadata
+        if not self.runtime.speed_enabled:
+            return
+        speed = await self._fetch_speed()
+        if not speed:
+            return
+        suffix = self._speed_suffix(speed)
+        if not suffix:
+            return
+        try:
+            # Bestehenden Status-Text (Karte · Aktion) um die Geschwindigkeit
+            # erweitern; nur die Geschwindigkeit ändert sich, nicht die Aktion.
+            current = self.presence_mgr._current_custom_status
+            if current and current[1]:
+                message = f"{current[1]} ⚡ {suffix}"
+                await self.presence_mgr.set_custom_status_message(message, current[0])
+        except Exception as exc:
+            logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Deck hat kein Typing-Konzept → No-Op (Contract erfüllen)."""
+
+    async def _fetch_speed(self) -> Optional[Dict[str, Any]]:
+        """Liest die Live-Geschwindigkeit vom Ollama-Sidecar (über NPM-/speed).
+
+        Kurzer Timeout + best-effort: ein toter Sidecar darf nie den Turn
+        verlangsamen. Ergebnis wird kurz gecacht, damit die häufigen
+        Typing-Heartbeats den Sidecar nicht fluten.
+        """
+        if not self.runtime.speed_url:
+            return None
+        try:
+            if self._speed_session is None or self._speed_session.closed:
+                self._speed_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=0.4)
+                )
+            async with self._speed_session.get(
+                self.runtime.speed_url, timeout=aiohttp.ClientTimeout(total=0.4)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json(content_type=None)
+                self._last_speed = data if isinstance(data, dict) else None
+                return self._last_speed
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+
+    @staticmethod
+    def _speed_suffix(speed: Dict[str, Any]) -> str:
+        """Formatiert den Sidecar-JSON in einen kompakten Geschwindigkeits-Text."""
+        phase = str(speed.get("phase", "idle"))
+        if phase == "generate":
+            tg = speed.get("tg")
+            if isinstance(tg, (int, float)) and tg > 0:
+                return f"{tg:.1f} t/s"
+            return ""
+        if phase == "prompt":
+            progress = speed.get("prompt_progress")
+            if isinstance(progress, (int, float)) and progress > 0:
+                pct = int(progress * 100)
+                return f"Kontext {pct}%"
+            return ""
+        return ""
+
+    async def _card_status_label(self, chat_id: str) -> str:
+        """Liefert ein kompaktes Karten-Label ('Karte 116 · Titel') für den Status.
+
+        Der Titel wird pro Karte einmalig (best-effort) aufgelöst und gecacht,
+        damit die häufigen Status-Updates keinen API-Spam erzeugen. Fällt die
+        Auflösung aus, bleibt nur die Karten-Nummer.
+        """
+        card_id = self._card_id_from_target(str(chat_id or ""))
+        if not card_id or card_id == str(chat_id or ""):
+            return ""
+        cache = getattr(self, "_status_card_title_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_status_card_title_cache", cache)
+        title = cache.get(card_id)
+        if title is None:
+            title = ""
+            try:
+                board_id, stack_id = await self._locate_card(card_id)
+                card = await self.client.get_card(board_id, stack_id, card_id)
+                if card and card.get("title"):
+                    title = str(card["title"]).strip()
+            except Exception:
+                title = ""
+            # Leeren Titel als '' cachen (nicht erneut versuchen) — aber ein
+            # Lookup-Fehler (exception) soll beim nächsten Mal neu versuchen.
+            cache[card_id] = title
+        label = f"Karte {card_id}"
+        if title:
+            short = title if len(title) <= 26 else title[:25].rstrip() + "…"
+            label = f"Karte {card_id} · {short}"
+        return label
+
+    @staticmethod
+    def _map_progress_status(status_key: str, content: str) -> tuple[Optional[str], Optional[str]]:
+        """Übersetzt Gateway-Status-Signal in (Text, Emoji) für den User-Status.
+
+        Gleiche Semantik wie das Talk-Plugin: context laden, thinking,
+        generating, tool-Ausführung.
+        """
+        normalized_key = str(status_key or "").strip().lower()
+        normalized_content = " ".join(str(content or "").split()).strip()
+        normalized_lower = normalized_content.lower()
+        if "context" in normalized_lower:
+            return "Liest Kontext", "📖"
+        if normalized_key == "_thinking" or normalized_lower.startswith("💬 "):
+            return "Denkt nach", "🤔"
+        if normalized_key in ("_generating", "_responding", "llm.generating"):
+            return "Antwortet", "✍️"
+        if normalized_key.startswith("tool.") or "tool" in normalized_key:
+            return "Fuehrt Werkzeuge aus", "🛠️"
+        if normalized_content:
+            return (normalized_content[:80], "💬")
+        return None, None
 
 
 def validate_deck_config(config: PlatformConfig) -> bool:

@@ -45,3 +45,11 @@ optional_env:
     description: "Template language (de or en, default de)"
     prompt: "Template language"
     password: false
+  - name: NEXTCLOUD_DECK_SPEED_ENABLED
+    description: "Show live token-generation speed (t/s) in the user status via the Ollama sidecar (default false)"
+    prompt: "Enable live token speed in status"
+    password: false
+  - name: NEXTCLOUD_DECK_SPEED_URL
+    description: "URL of the Ollama speed sidecar endpoint (e.g. https://ollama.cloud.kiga-gramschatz.de/speed)"
+    prompt: "Ollama speed sidecar URL"
+    password: false
