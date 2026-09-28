@@ -433,11 +433,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         self._speed_session: Optional[aiohttp.ClientSession] = None
         self._last_speed: Optional[Dict[str, Any]] = None
-        # Karten-Label ("Karte N · Titel") gemerkt, damit der send_typing-
-        # Heartbeat die Aktion aus der Sidecar-Phase (prompt/generate) neu
-        # ableiten kann und nicht an einem veralteten Gateway-Aktionstext
-        # kleben bleibt (sonst "Liest Kontext ⚡ 11.9 t/s" beim Phasenwechsel).
-        self._status_card_label: Optional[str] = None
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -2067,9 +2062,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 message = f"{card_label} · {message}"
             try:
                 await self.presence_mgr.set_custom_status_message(message, icon)
-                # Karten-Label separat merken (für die Phasen-korrekte Aktion
-                # im send_typing-Heartbeat).
-                self._status_card_label = card_label
             except Exception as exc:
                 logger.debug("Deck: Custom-Status setzen fehlgeschlagen: %s", exc)
         return SendResult(success=True)
@@ -2093,14 +2085,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not suffix:
             return
         try:
-            # Karten-Label direkt aus chat_id auflösen (eigener Cache), statt
-            # sich auf _status_card_label zu verlassen — der Heartbeat kann vor
-            # dem ersten send_or_update_status laufen.
-            card_label = self._status_card_label
-            if not card_label:
-                card_label = await self._card_status_label(chat_id)
-                if card_label:
-                    self._status_card_label = card_label
+            # Karten-Label IMMER direkt aus chat_id auflösen (eigener Cache pro
+            # Karte). Ein globaler _status_card_label würde bei parallelen oder
+            # aufeinanderfolgenden Turns das Label der VORHERIGEN Karte zeigen.
+            card_label = await self._card_status_label(chat_id)
             phase = str(speed.get("phase", "idle")).lower()
             if phase == "generate":
                 action, icon = "Antwortet", "✍️"
