@@ -2093,7 +2093,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not suffix:
             return
         try:
-            card_label = self._status_card_label or ""
+            # Karten-Label direkt aus chat_id auflösen (eigener Cache), statt
+            # sich auf _status_card_label zu verlassen — der Heartbeat kann vor
+            # dem ersten send_or_update_status laufen.
+            card_label = self._status_card_label
+            if not card_label:
+                card_label = await self._card_status_label(chat_id)
+                if card_label:
+                    self._status_card_label = card_label
             phase = str(speed.get("phase", "idle")).lower()
             if phase == "generate":
                 action, icon = "Antwortet", "✍️"
