@@ -1277,16 +1277,23 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     }
 
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
-        """Zählt Karten in Arbeits-Spalten (todo/ready/running) über ALLE Boards.
+        """Zählt Karten in Arbeits-Spalten (todo/ready/running/triage) über ALLE
+        Boards.
 
         Wird für das GLOBALE WIP-Limit genutzt: Karten, die der Mensch aktiv in
         den Workflow gegeben hat (nicht Backlog/Review/Blocked/Done), gelten als
         "in Arbeit" — unabhängig davon, auf welchem Board sie liegen.
         ``exclude_card_id`` blendet die aktuell betrachtete Karte aus, damit
         deren eigener Status nicht die Zählung verfälscht.
+
+        Wichtig: Karten mit dem "Waiting"-Label werden NICHT mitgezählt. Sie
+        warten selbst auf freie WIP-Kapazität; würden sie zählen, blockierten
+        sich mehrere Waiting-Karten in Triage gegenseitig (Deadlock, siehe
+        Karten 120/121).
         """
         if not self.runtime.max_in_progress:
             return 0
+        waiting_title = friendly_label_title("waiting").lower()
         total = 0
         for board_id in self.runtime.boards:
             try:
@@ -1300,6 +1307,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 for card in stack.get("cards") or []:
                     cid = str(card.get("id") or "").strip()
                     if exclude_card_id and cid == exclude_card_id:
+                        continue
+                    labels = self._card_label_titles(card)
+                    if any(str(l).strip().lower() == waiting_title for l in labels):
                         continue
                     total += 1
         return total
