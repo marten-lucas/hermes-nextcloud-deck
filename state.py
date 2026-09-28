@@ -17,6 +17,11 @@ class DeckCardSnapshot:
     labels: List[str] = field(default_factory=list)
     last_comment_id: Optional[str] = None
     last_author: Optional[str] = None
+    # Inhalt des neuesten Kommentars — damit ein EDIT eines bestehenden
+    # Kommentars (gleiche ID, geänderter Text) als Trigger erkannt wird.
+    # Deck liefert pro Kommentar kein lastModified-Feld, daher ist der
+    # Message-Text der einzige verlässliche Änderungsindikator.
+    last_comment_message: Optional[str] = None
     due_date: Optional[str] = None
     done: object = None
 
@@ -31,6 +36,7 @@ class DeckCardSnapshot:
             "labels": sorted(self.labels),
             "last_comment_id": self.last_comment_id,
             "last_author": self.last_author,
+            "last_comment_message": self.last_comment_message,
             "due_date": self.due_date,
             "done": self.done,
         }

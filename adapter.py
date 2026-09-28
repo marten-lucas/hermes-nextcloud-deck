@@ -1403,6 +1403,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             labels=label_titles,
             last_comment_id=str(last.get("id")) if last.get("id") else None,
             last_author=last_author,
+            last_comment_message=str(last.get("message") or "") if last else None,
             due_date=str(card.get("duedate")) if card.get("duedate") else None,
             done=card.get("done"),
         )
@@ -1867,6 +1868,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             labels=self._card_label_titles(current),
             last_comment_id=str(last.get("id")) if last.get("id") else None,
             last_author=self._last_comment_author(last) if last else None,
+            last_comment_message=str(last.get("message") or "") if last else None,
             due_date=str(current.get("duedate")) if current.get("duedate") else None,
             done=current.get("done"),
         )
