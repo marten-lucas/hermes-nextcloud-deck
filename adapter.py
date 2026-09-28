@@ -433,10 +433,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         self._speed_session: Optional[aiohttp.ClientSession] = None
         self._last_speed: Optional[Dict[str, Any]] = None
-        # Sauberer Basis-Status (Karte · Aktion) OHNE Speed-Suffix. Der
-        # send_typing-Heartbeat setzt daran den Live-Speed an, ohne dass sich
-        # alte "⚡ …"-Suffixe aufstapeln.
-        self._status_base: Optional[str] = None
+        # Karten-Label ("Karte N · Titel") gemerkt, damit der send_typing-
+        # Heartbeat die Aktion aus der Sidecar-Phase (prompt/generate) neu
+        # ableiten kann und nicht an einem veralteten Gateway-Aktionstext
+        # kleben bleibt (sonst "Liest Kontext ⚡ 11.9 t/s" beim Phasenwechsel).
+        self._status_card_label: Optional[str] = None
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -2066,17 +2067,22 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 message = f"{card_label} · {message}"
             try:
                 await self.presence_mgr.set_custom_status_message(message, icon)
-                # Basis-Text (ohne Speed) merken: der send_typing-Heartbeat
-                # setzt daran den Live-Speed an. So stapeln sich keine alten
-                # "⚡ …"-Suffixe auf.
-                self._status_base = message
+                # Karten-Label separat merken (für die Phasen-korrekte Aktion
+                # im send_typing-Heartbeat).
+                self._status_card_label = card_label
             except Exception as exc:
                 logger.debug("Deck: Custom-Status setzen fehlgeschlagen: %s", exc)
         return SendResult(success=True)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Typing-Heartbeat: aktualisiert bei aktivem Speed-Tracking den Status
-        mit der Live-Geschwindigkeit (Sidecar) — Deck hat sonst kein Typing."""
+        mit der Live-Geschwindigkeit (Sidecar) — Deck hat sonst kein Typing.
+
+        Die AKTION (Liest Kontext / Antwortet) und das Icon werden aus der
+        Sidecar-Phase abgeleitet, NICHT aus dem Gateway-Status-Text. So bleibt
+        beim Phasenübergang prompt→generate die Anzeige konsistent (kein
+        "Liest Kontext ⚡ 11.9 t/s" mehr, wenn längst generiert wird).
+        """
         del metadata
         if not self.runtime.speed_enabled:
             return
@@ -2087,18 +2093,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not suffix:
             return
         try:
-            # Basis-Text (Karte · Aktion) OHNE Speed-Suffix als Ausgangspunkt
-            # nehmen — so ersetzt jede Aktualisierung den Speed komplett, statt
-            # alte "⚡ …"-Suffixe aufzustapeln. Das Icon bleibt erhalten.
-            base = self._status_base
-            icon = None
-            if self.presence_mgr._current_custom_status:
-                icon = self.presence_mgr._current_custom_status[0]
-            if not base:
-                base = self.presence_mgr._current_custom_status[1] if self.presence_mgr._current_custom_status else ""
-            if not base:
-                return
-            message = f"{base} ⚡ {suffix}"
+            card_label = self._status_card_label or ""
+            phase = str(speed.get("phase", "idle")).lower()
+            if phase == "generate":
+                action, icon = "Antwortet", "✍️"
+            else:
+                action, icon = "Liest Kontext", "📖"
+            prefix = f"{card_label} · {action}" if card_label else action
+            message = f"{prefix} ⚡ {suffix}"
             await self.presence_mgr.set_custom_status_message(message, icon)
         except Exception as exc:
             logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
