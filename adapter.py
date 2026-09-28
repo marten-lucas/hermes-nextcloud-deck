@@ -433,6 +433,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         self._speed_session: Optional[aiohttp.ClientSession] = None
         self._last_speed: Optional[Dict[str, Any]] = None
+        # Sauberer Basis-Status (Karte · Aktion) OHNE Speed-Suffix. Der
+        # send_typing-Heartbeat setzt daran den Live-Speed an, ohne dass sich
+        # alte "⚡ …"-Suffixe aufstapeln.
+        self._status_base: Optional[str] = None
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -2058,6 +2062,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 message = f"{card_label} · {message}"
             try:
                 await self.presence_mgr.set_custom_status_message(message, icon)
+                # Basis-Text (ohne Speed) merken: der send_typing-Heartbeat
+                # setzt daran den Live-Speed an. So stapeln sich keine alten
+                # "⚡ …"-Suffixe auf.
+                self._status_base = message
             except Exception as exc:
                 logger.debug("Deck: Custom-Status setzen fehlgeschlagen: %s", exc)
         return SendResult(success=True)
@@ -2075,12 +2083,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not suffix:
             return
         try:
-            # Bestehenden Status-Text (Karte · Aktion) um die Geschwindigkeit
-            # erweitern; nur die Geschwindigkeit ändert sich, nicht die Aktion.
-            current = self.presence_mgr._current_custom_status
-            if current and current[1]:
-                message = f"{current[1]} ⚡ {suffix}"
-                await self.presence_mgr.set_custom_status_message(message, current[0])
+            # Basis-Text (Karte · Aktion) OHNE Speed-Suffix als Ausgangspunkt
+            # nehmen — so ersetzt jede Aktualisierung den Speed komplett, statt
+            # alte "⚡ …"-Suffixe aufzustapeln. Das Icon bleibt erhalten.
+            base = self._status_base
+            icon = None
+            if self.presence_mgr._current_custom_status:
+                icon = self.presence_mgr._current_custom_status[0]
+            if not base:
+                base = self.presence_mgr._current_custom_status[1] if self.presence_mgr._current_custom_status else ""
+            if not base:
+                return
+            message = f"{base} ⚡ {suffix}"
+            await self.presence_mgr.set_custom_status_message(message, icon)
         except Exception as exc:
             logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
 
@@ -2114,7 +2129,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     @staticmethod
     def _speed_suffix(speed: Dict[str, Any]) -> str:
-        """Formatiert den Sidecar-JSON in einen kompakten Geschwindigkeits-Text."""
+        """Formatiert den Sidecar-JSON in einen kompakten Geschwindigkeits-Text.
+
+        Generate-Phase zeigt die Generation-Geschwindigkeit (``tg``, ~10-20 t/s),
+        Prompt-Phase zeigt BOTH den Kontext-Fortschritt UND die Prompt-Geschwindigkeit
+        (``prompt_tps``, ~100 t/s) — so ist die schnelle Token-Verarbeitung beim
+        Kontext-Einlesen sichtbar.
+        """
         phase = str(speed.get("phase", "idle"))
         if phase == "generate":
             tg = speed.get("tg")
@@ -2123,10 +2144,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return ""
         if phase == "prompt":
             progress = speed.get("prompt_progress")
+            prompt_tps = speed.get("prompt_tps")
+            parts: List[str] = []
             if isinstance(progress, (int, float)) and progress > 0:
                 pct = int(progress * 100)
-                return f"Kontext {pct}%"
-            return ""
+                parts.append(f"Kontext {pct}%")
+            if isinstance(prompt_tps, (int, float)) and prompt_tps > 0:
+                parts.append(f"⏱ {prompt_tps:.0f} t/s")
+            return " · ".join(parts)
         return ""
 
     async def _card_status_label(self, chat_id: str) -> str:
