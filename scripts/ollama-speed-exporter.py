@@ -49,6 +49,32 @@ _state: dict = {
 }
 _lock = threading.Lock()
 
+# Gilt eine letzte print_timing-Zeile als "live"? Nach STALE_AFTER_SECONDS ohne
+# neue Ollama-Zeile wird der Zustand als idle ausgeliefert — sonst meldet /speed
+# dauerhaft die letzte (veraltete) Phase, obwohl Ollama längst fertig ist.
+STALE_AFTER_SECONDS = 30.0
+
+
+def _snapshot() -> dict:
+    """Liefert den aktuellen Zustand; überschrieben zu idle, wenn veraltet."""
+    with _lock:
+        state = dict(_state)
+    if state.get("phase") != "idle" and state.get("ts"):
+        age = time.time() - float(state.get("ts"))
+        if age > STALE_AFTER_SECONDS:
+            return {
+                "phase": "idle",
+                "tg": 0.0,
+                "tg_3s": 0.0,
+                "n_gen": state.get("n_gen", 0),
+                "prompt_tokens": state.get("prompt_tokens", 0),
+                "prompt_progress": 1.0,
+                "prompt_tps": 0.0,
+                "task_id": state.get("task_id"),
+                "ts": state.get("ts"),
+            }
+    return state
+
 
 def _tail_journald() -> None:
     proc = subprocess.Popen(
@@ -95,8 +121,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        with _lock:
-            body = json.dumps(_state).encode()
+        body = json.dumps(_snapshot()).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

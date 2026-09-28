@@ -2101,7 +2101,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Deck hat kein Typing-Konzept → No-Op (Contract erfüllen)."""
+        """Turn-Ende: Live-Status (Aktion + Speed) aufräumen.
+
+        Deck hat kein Typing, aber der send_typing-Heartbeat hat einen Custom-
+        Status ("Karte N · Antwortet ⚡ …") gesetzt. Der muss beim Turn-Ende
+        entfernt werden, sonst klebt "Antwortet ⚡ 8.1 t/s" dauerhaft am User,
+        obwohl keine Karte mehr läuft. Wir setzen den User auf "online" (busy
+        war via mark_turn_started/finished referenzgezählt) und löschen den
+        Custom-Status.
+        """
+        try:
+            await self.presence_mgr.clear_custom_status_message(force=True)
+        except Exception as exc:
+            logger.debug("Deck: Custom-Status beim stop_typing löschen fehlgeschlagen: %s", exc)
 
     async def _fetch_speed(self) -> Optional[Dict[str, Any]]:
         """Liest die Live-Geschwindigkeit vom Ollama-Sidecar (über NPM-/speed).
