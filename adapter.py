@@ -1272,8 +1272,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     # Aktive Arbeits-Spalten (für WIP-Zählung und WIP-Gate). Als Modul-/
     # Klassenkonstante definiert, damit _count_active_cards und der WIP-Guard
     # in _process_card dieselbe Definition nutzen (keine Drift).
+    # "triage" zählt mit: eine dort zugewiesene Karte wird getriggert, soll aber
+    # wie jede andere aktive Karte gegen das globale WIP-Limit gesperrt werden
+    # (sonst startet sie parallel zu einer laufenden Karte — siehe Karte 121).
     _ACTIVE_STACK_TITLES = {
         "todo", "ready", "running", "to do", "in progress", "in bearbeitung",
+        "triage",
     }
 
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
@@ -1444,10 +1448,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # Review/Blocked/Done geschoben wurde. Die wartende Karte bekommt das
         # Label "Waiting", damit sichtbar ist, dass der Adapter sie gesehen hat.
         # Fix 2a: Das WIP-Limit gilt NUR für Karten, die selbst in einer aktiven
-        # Arbeits-Spalte (todo/ready/running) liegen. Karten in Review/Blocked/
-        # Done warten auf den Menschen oder sind beendet — sie dürfen NICHT mit
-        # 'Waiting' belegt und NICHT gegen das WIP-Limit gesperrt werden, sonst
-        # entsteht ein endloser WIP-Spam (siehe Karte 117 in Review).
+        # Arbeits-Spalte (todo/ready/running/triage) liegen. Karten in Review/
+        # Blocked/Done warten auf den Menschen oder sind beendet — sie dürfen
+        # NICHT mit 'Waiting' belegt und NICHT gegen das WIP-Limit gesperrt
+        # werden, sonst entsteht ein endloser WIP-Spam (siehe Karte 117 in Review).
         current_stack_title = str(stack.get("title") or "").strip().lower()
         if (
             self.runtime.max_in_progress > 0
