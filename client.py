@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -52,6 +53,17 @@ class NextcloudDeckClient:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=self.timeout)
         return self._session
+
+    async def reset_session(self) -> None:
+        """Schließt die aktuelle Session und erzwingt beim nächsten Request
+        einen Neuaufbau. Wird nach Timeout/Connection-Error aufgerufen, damit
+        ein toter Socket nicht jeden Folge-Poll lähmt."""
+        if self._session and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._session = None
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -161,7 +173,13 @@ class NextcloudDeckClient:
                     raise NextcloudDeckError(
                         f"Deck API returned non-JSON for {path}: {raw[:500]}"
                     ) from exc
+        except asyncio.TimeoutError as exc:
+            # Timeout: Session zurücksetzen, damit der nächste Poll nicht am
+            # selben toten Socket hängt (sonst Timeout-Kaskade → Loop tot).
+            await self.reset_session()
+            raise NextcloudDeckError(f"Deck API timeout for {path}: {exc}") from exc
         except aiohttp.ClientError as exc:
+            await self.reset_session()
             raise NextcloudDeckError(f"Deck API connection failed for {path}: {exc}") from exc
 
     async def get_boards(self) -> List[Dict[str, Any]]:

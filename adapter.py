@@ -2062,13 +2062,26 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.warning("Deck: Backlog-Template-Sicherung fehlgeschlagen (Board %s): %s", board_id, exc)
 
     async def _polling_loop(self) -> None:
+        # Zähler für Health-Log (Fix 3): macht einen stillen Loop-Tod sichtbar.
+        poll_count = 0
         while not self._stop_event.is_set():
             try:
                 await self.poll_once()
+                poll_count += 1
+                # Health-Log alle 20 Zyklen (~10 min bei 30s-Intervall), damit
+                # ein lebender Loop beobachtbar bleibt.
+                if poll_count % 20 == 0:
+                    logger.info("Deck: Polling-Loop aktiv (%d Zyklen).", poll_count)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Nextcloud Deck polling failed")
+                # Fix 2: Session nach Fehler zurücksetzen, damit ein einzelner
+                # Timeout/Connection-Error nicht den Loop dauerhaft lähmt.
+                try:
+                    await self.client.reset_session()
+                except Exception:
+                    pass
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
