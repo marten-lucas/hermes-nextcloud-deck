@@ -1391,6 +1391,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     labels = self._card_label_titles(card)
                     if any(str(l).strip().lower() == waiting_title for l in labels):
                         continue
+                    # Nur Karten zählen, die tatsächlich verarbeitet werden
+                    # sollen (Trigger vorhanden). Eine Karte in Ready/Running
+                    # OHNE Trigger (letzter Turn endete, Baseline gesetzt) hat
+                    # keinen aktiven Lauf und darf das WIP-Limit nicht blockieren
+                    # — sonst hängt eine fertige Karte in Ready und blockiert
+                    # alle anderen (siehe Karte 123 blockiert Karte 120).
+                    try:
+                        comments = await self.client.get_card_comments(cid)
+                    except NextcloudDeckError:
+                        comments = []
+                    if not self._card_is_triggered(card, comments):
+                        continue
                     total += 1
         # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
         # (send_typing gesehen, stop_typing noch nicht), zählen ebenfalls gegen
