@@ -50,6 +50,7 @@ try:
         analyze_board_suitability,
         extract_hermes_labels,
         is_backlog_stack,
+        is_terminal_stack,
         parse_subtasks,
     )
 except ImportError:  # direct test/import
@@ -91,6 +92,7 @@ except ImportError:  # direct test/import
         analyze_board_suitability,
         extract_hermes_labels,
         is_backlog_stack,
+        is_terminal_stack,
         parse_subtasks,
     )
 
@@ -1415,6 +1417,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         board_config = self._configured_board(board_id)
         if is_backlog_stack(stack, board_config):
             logger.debug("Nextcloud Deck: Karte %s liegt im Backlog ('%s') und wird ignoriert.", card_id, stack.get("title"))
+            return
+
+        # End-Spalten-Filter: Karten in Review/Blocked/Done warten auf den Menschen
+        # oder sind beendet. Sie starten KEINE neuen Turns — auch wenn der Bot
+        # zugewiesen ist. Sonst laufen nach einem Gateway-Restart mehrere Karten
+        # parallel (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
+        # zugewiesene Karte als "neu" getriggert wird (siehe Karte 121 in Review).
+        if is_terminal_stack(stack, board_config):
+            logger.debug(
+                "Nextcloud Deck: Karte %s liegt in End-Spalte ('%s') und wird ignoriert.",
+                card_id, stack.get("title"),
+            )
             return
 
         comments = await self.client.get_card_comments(card_id)

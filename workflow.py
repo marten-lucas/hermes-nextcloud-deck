@@ -644,6 +644,32 @@ def is_backlog_stack(stack: Dict[str, Any], board_config: Optional[Dict[str, Any
     return stack_title in {"backlog", "ideen", "ideas", "icebox"}
 
 
+def is_terminal_stack(stack: Dict[str, Any], board_config: Optional[Dict[str, Any]] = None) -> bool:
+    """Prüft, ob der Stack eine End-Spalte ist (Review/Blocked/Done).
+
+    Karten in diesen Spalten warten auf den Menschen (Review/Blocked) oder sind
+    beendet (Done). Sie sollen KEINE neuen Turns starten — auch wenn der Bot
+    zugewiesen ist —, sonst laufen nach einem Gateway-Restart mehrere Karten
+    parallel (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
+    zugewiesene Karte als "neu" getriggert wird.
+    """
+    stack_title = str(stack.get("title") or "").strip().lower()
+    stack_id = str(stack.get("id") or "").strip()
+
+    if board_config:
+        mapping = board_config.get("status_mapping") or board_config.get("stack_mapping") or {}
+        for status in (STATUS_REVIEW, STATUS_BLOCKED, STATUS_DONE):
+            configured = mapping.get(status)
+            if configured and (
+                str(configured).strip() == stack_id
+                or str(configured).strip().lower() == stack_title
+            ):
+                return True
+
+    # Fallback-Namensmatching
+    return stack_title in {"review", "blocked", "done", "erledigt", "abgeschlossen", "gesperrt"}
+
+
 def build_capabilities_prompt(
     phase: str,
     task_type: Optional[str] = None,
