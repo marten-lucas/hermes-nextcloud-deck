@@ -1421,6 +1421,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     )
                     if not self.state.should_process(snapshot):
                         continue
+                    logger.info(
+                        "Deck: WIP-Zähler zählt Karte %s (Stack=%s, should_process=True)",
+                        cid, title,
+                    )
                     total += 1
         # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
         # (send_typing gesehen, stop_typing noch nicht), zählen ebenfalls gegen
