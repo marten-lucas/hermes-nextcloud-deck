@@ -1392,16 +1392,34 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     if any(str(l).strip().lower() == waiting_title for l in labels):
                         continue
                     # Nur Karten zählen, die tatsächlich verarbeitet werden
-                    # sollen (Trigger vorhanden). Eine Karte in Ready/Running
-                    # OHNE Trigger (letzter Turn endete, Baseline gesetzt) hat
-                    # keinen aktiven Lauf und darf das WIP-Limit nicht blockieren
-                    # — sonst hängt eine fertige Karte in Ready und blockiert
-                    # alle anderen (siehe Karte 123 blockiert Karte 120).
+                    # sollen (Fingerprint geändert = neuer Trigger). Eine Karte
+                    # in Ready/Running OHNE neuen Trigger (letzter Turn endete,
+                    # Baseline gesetzt) hat keinen aktiven Lauf und darf das
+                    # WIP-Limit nicht blockieren — sonst hängt eine fertige
+                    # Karte in Ready und blockiert alle anderen (siehe Karte
+                    # 123 blockiert Karte 120).
                     try:
                         comments = await self.client.get_card_comments(cid)
                     except NextcloudDeckError:
                         comments = []
                     if not self._card_is_triggered(card, comments):
+                        continue
+                    last = comments[-1] if comments else {}
+                    snapshot = DeckCardSnapshot(
+                        board_id=board_id,
+                        stack_id=str(stack.get("id") or "").strip(),
+                        card_id=cid,
+                        title=str(card.get("title") or ""),
+                        description=str(card.get("description") or ""),
+                        assigned_users=self.identity.assigned_uids(card),
+                        labels=labels,
+                        last_comment_id=str(last.get("id")) if last.get("id") else None,
+                        last_author=self._last_comment_author(last) if last else None,
+                        last_comment_message=str(last.get("message") or "") if last else None,
+                        due_date=str(card.get("duedate")) if card.get("duedate") else None,
+                        done=card.get("done"),
+                    )
+                    if not self.state.should_process(snapshot):
                         continue
                     total += 1
         # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
