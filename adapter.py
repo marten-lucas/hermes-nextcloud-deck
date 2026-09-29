@@ -1424,7 +1424,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # zugewiesen ist. Sonst laufen nach einem Gateway-Restart mehrere Karten
         # parallel (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
         # zugewiesene Karte als "neu" getriggert wird (siehe Karte 121 in Review).
-        logger.debug(
+        logger.info(
             "Deck: _process_card Karte %s Stack=%r terminal=%s",
             card_id, stack.get("title"), is_terminal_stack(stack, board_config),
         )
