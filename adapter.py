@@ -474,6 +474,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._connected = True
         if self._polling_task is None or self._polling_task.done():
             self._polling_task = asyncio.create_task(self._polling_loop())
+        # Auto-Resume-Bereinigung: Nach einem Gateway-Restart setzt das Gateway
+        # unterbrochene Sessions automatisch fort (auch für Karten in End-Spalten
+        # wie Review/Blocked/Done). Das führt zu parallelen Turns, die Ollama
+        # überlasten (WIP-Verletzung). Wir löschen die resume_pending-Marker für
+        # Karten in End-Spalten/Backlog, damit diese NICHT auto-resumed werden.
+        await self._clear_resume_pending_for_terminal_cards()
         # Board-Eignung prüfen und bei Problemen laut loggen (kein Abbruch —
         # ein ungeeignetes Board darf das Gateway nicht blockieren).
         await self.check_board_suitability()
@@ -501,6 +507,71 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             fut = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
             return await asyncio.wrap_future(fut)
         return await coro_factory()
+
+    async def _clear_resume_pending_for_terminal_cards(self) -> None:
+        """Löscht resume_pending-Marker für Deck-Karten in End-Spalten/Backlog.
+
+        Nach einem Gateway-Restart setzt das Gateway unterbrochene Sessions
+        automatisch fort (Auto-Resume), auch für Karten in Review/Blocked/Done
+        oder Backlog. Das führt zu parallelen Turns, die Ollama überlasten
+        (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
+        zugewiesene Karte als "neu" getriggert wird.
+
+        Diese Methode scannt alle konfigurierten Boards, identifiziert Karten in
+        End-Spalten/Backlog und löscht deren resume_pending-Marker im
+        Session-Store, damit sie NICHT auto-resumed werden.
+        """
+        store = getattr(self, "_session_store", None)
+        if store is None:
+            return
+        # Session-Store-Einträge mit Deck-Karten-Keys sammeln.
+        try:
+            entries = getattr(store, "_entries", None)
+            if not isinstance(entries, dict):
+                return
+            deck_keys = [
+                key for key in entries
+                if isinstance(key, str) and "deck:board:" in key
+            ]
+        except Exception as exc:
+            logger.debug("Deck: Session-Store-Einträge nicht lesbar: %s", exc)
+            return
+        if not deck_keys:
+            return
+        # Karten in End-Spalten/Backlog identifizieren (pro Board einmal laden).
+        terminal_card_ids: set[str] = set()
+        for board_id in self.runtime.boards:
+            try:
+                stacks = await self.client.get_stacks(board_id)
+            except Exception:
+                continue
+            board_config = self._configured_board(board_id)
+            for stack in stacks or []:
+                if is_backlog_stack(stack, board_config) or is_terminal_stack(stack, board_config):
+                    for card in stack.get("cards") or []:
+                        cid = str(card.get("id") or "").strip()
+                        if cid:
+                            terminal_card_ids.add(cid)
+        if not terminal_card_ids:
+            return
+        cleared = 0
+        for key in deck_keys:
+            # Key-Format: ...:deck:board:<board>:card:<card_id>:<user>
+            if ":card:" not in key:
+                continue
+            card_part = key.split(":card:", 1)[1]
+            card_id = card_part.split(":", 1)[0]
+            if card_id in terminal_card_ids:
+                try:
+                    if store.clear_resume_pending(key):
+                        cleared += 1
+                except Exception as exc:
+                    logger.debug("Deck: clear_resume_pending für %s fehlgeschlagen: %s", key, exc)
+        if cleared:
+            logger.info(
+                "Deck: Auto-Resume für %d Karte(n) in End-Spalten/Backlog deaktiviert (WIP-Schutz).",
+                cleared,
+            )
 
     async def check_board_suitability(self) -> List[Any]:
         """Prüft alle konfigurierten Boards auf Workflow-Eignung und loggt Reports.
@@ -1424,10 +1495,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # zugewiesen ist. Sonst laufen nach einem Gateway-Restart mehrere Karten
         # parallel (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
         # zugewiesene Karte als "neu" getriggert wird (siehe Karte 121 in Review).
-        logger.info(
-            "Deck: _process_card Karte %s Stack=%r terminal=%s",
-            card_id, stack.get("title"), is_terminal_stack(stack, board_config),
-        )
         if is_terminal_stack(stack, board_config):
             logger.debug(
                 "Nextcloud Deck: Karte %s liegt in End-Spalte ('%s') und wird ignoriert.",
