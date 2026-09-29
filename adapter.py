@@ -1907,7 +1907,19 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.warning("Deck: Auto-Block-Kommentar für Karte %s fehlgeschlagen: %s", card_id, exc)
 
     async def _rebaseline_card(self, board_id: str, stack_id: str, card_id: str) -> None:
-        """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu."""
+        """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu.
+
+        WICHTIG: ``stack_id`` kann nach einem Move der AEHRE Stack sein (z. B.
+        die Karte wurde gerade von Triage nach Review verschoben). Deshalb wird
+        die aktuelle Position zuerst per _locate_card neu ermittelt — sonst
+        liefert get_card mit dem alten Stack None, die Baseline wird NICHT
+        gesetzt, und die Karte erscheint beim nächsten Poll als "verändert"
+        (Re-Trigger-Schleife nach einem Review-Move).
+        """
+        # Aktuelle Position (board_id + stack_id) neu auflösen, falls vorhanden.
+        location = await self._locate_card(card_id)
+        if location is not None:
+            board_id, stack_id = location
         try:
             current = await self.client.get_card(board_id, stack_id, card_id)
         except Exception:
