@@ -433,6 +433,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         self._speed_session: Optional[aiohttp.ClientSession] = None
         self._last_speed: Optional[Dict[str, Any]] = None
+        # In-Flight-Tracking: Karten, deren Turn gerade aktiv läuft (via
+        # send_typing/stop_typing). Wird in die WIP-Zählung einbezogen, damit
+        # das WIP-Limit auch BEREITS LAUFENDE Turns berücksichtigt — nicht nur
+        # den Stack-Zustand. Sonst laufen mehrere freigegebene Karten parallel
+        # (jede hat einen eigenen Session-Key, das Gateway serialisiert nur
+        # pro Karte, nicht über Karten hinweg).
+        self._active_turns: set[str] = set()
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
@@ -1312,6 +1319,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     if any(str(l).strip().lower() == waiting_title for l in labels):
                         continue
                     total += 1
+        # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
+        # (send_typing gesehen, stop_typing noch nicht), zählen ebenfalls gegen
+        # das WIP-Limit — auch wenn sie (noch) nicht in einer aktiven Spalte
+        # liegen. So verhindern wir, dass mehrere freigegebene Karten parallel
+        # anlaufen (jede hat einen eigenen Session-Key; das Gateway serialisiert
+        # nur pro Karte, nicht über Karten hinweg).
+        for cid in self._active_turns:
+            if exclude_card_id and cid == exclude_card_id:
+                continue
+            total += 1
         return total
 
     def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
@@ -2177,6 +2194,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         del metadata
         if not self.runtime.speed_enabled:
             return
+        # In-Flight-Tracking: Diese Karte läuft gerade aktiv. Wird in die
+        # WIP-Zählung einbezogen (siehe _count_active_cards).
+        card_id = self._card_id_from_target(str(chat_id or ""))
+        if card_id:
+            self._active_turns.add(card_id)
         speed = await self._fetch_speed()
         if not speed:
             return
@@ -2221,6 +2243,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             await self.presence_mgr.set_presence_status("online")
         except Exception as exc:
             logger.debug("Deck: Custom-Status beim stop_typing löschen fehlgeschlagen: %s", exc)
+        finally:
+            # In-Flight-Tracking: Turn dieser Karte ist beendet.
+            card_id = self._card_id_from_target(str(chat_id or ""))
+            if card_id:
+                self._active_turns.discard(card_id)
 
     async def _fetch_speed(self) -> Optional[Dict[str, Any]]:
         """Liest die Live-Geschwindigkeit vom Ollama-Sidecar (über NPM-/speed).
