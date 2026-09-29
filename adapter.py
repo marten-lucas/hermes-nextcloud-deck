@@ -1359,77 +1359,25 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     }
 
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
-        """Zählt Karten in Arbeits-Spalten (todo/ready/running/triage) über ALLE
-        Boards.
+        """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
 
-        Wird für das GLOBALE WIP-Limit genutzt: Karten, die der Mensch aktiv in
-        den Workflow gegeben hat (nicht Backlog/Review/Blocked/Done), gelten als
-        "in Arbeit" — unabhängig davon, auf welchem Board sie liegen.
+        Wird für das GLOBALE WIP-Limit genutzt. Nur Karten, deren Turn gerade
+        aktiv läuft (``_active_turns``), zählen gegen das Limit. Karten, die nur
+        in einer aktiven Spalte (todo/ready/running) liegen, aber KEINEN Turn
+        laufen, zählen NICHT — sonst blockiert eine fertige Karte in Ready das
+        WIP-Limit, obwohl sie gar nicht arbeitet (siehe Karte 123 blockiert
+        Karte 120 nach einem Restart, wenn der Fingerprint-Cache leer ist).
+
         ``exclude_card_id`` blendet die aktuell betrachtete Karte aus, damit
         deren eigener Status nicht die Zählung verfälscht.
-
-        Wichtig: Karten mit dem "Waiting"-Label werden NICHT mitgezählt. Sie
-        warten selbst auf freie WIP-Kapazität; würden sie zählen, blockierten
-        sich mehrere Waiting-Karten in Triage gegenseitig (Deadlock, siehe
-        Karten 120/121).
         """
         if not self.runtime.max_in_progress:
             return 0
-        waiting_title = friendly_label_title("waiting").lower()
         total = 0
-        for board_id in self.runtime.boards:
-            try:
-                stacks = await self.client.get_stacks(board_id)
-            except NextcloudDeckError:
-                continue
-            for stack in stacks or []:
-                title = str(stack.get("title") or "").strip().lower()
-                if title not in self._ACTIVE_STACK_TITLES:
-                    continue
-                for card in stack.get("cards") or []:
-                    cid = str(card.get("id") or "").strip()
-                    if exclude_card_id and cid == exclude_card_id:
-                        continue
-                    labels = self._card_label_titles(card)
-                    if any(str(l).strip().lower() == waiting_title for l in labels):
-                        continue
-                    # Nur Karten zählen, die tatsächlich verarbeitet werden
-                    # sollen (Fingerprint geändert = neuer Trigger). Eine Karte
-                    # in Ready/Running OHNE neuen Trigger (letzter Turn endete,
-                    # Baseline gesetzt) hat keinen aktiven Lauf und darf das
-                    # WIP-Limit nicht blockieren — sonst hängt eine fertige
-                    # Karte in Ready und blockiert alle anderen (siehe Karte
-                    # 123 blockiert Karte 120).
-                    try:
-                        comments = await self.client.get_card_comments(cid)
-                    except NextcloudDeckError:
-                        comments = []
-                    if not self._card_is_triggered(card, comments):
-                        continue
-                    last = comments[-1] if comments else {}
-                    snapshot = DeckCardSnapshot(
-                        board_id=board_id,
-                        stack_id=str(stack.get("id") or "").strip(),
-                        card_id=cid,
-                        title=str(card.get("title") or ""),
-                        description=str(card.get("description") or ""),
-                        assigned_users=self.identity.assigned_uids(card),
-                        labels=labels,
-                        last_comment_id=str(last.get("id")) if last.get("id") else None,
-                        last_author=self._last_comment_author(last) if last else None,
-                        last_comment_message=str(last.get("message") or "") if last else None,
-                        due_date=str(card.get("duedate")) if card.get("duedate") else None,
-                        done=card.get("done"),
-                    )
-                    if not self.state.should_process(snapshot):
-                        continue
-                    total += 1
-        # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
-        # (send_typing gesehen, stop_typing noch nicht), zählen ebenfalls gegen
-        # das WIP-Limit — auch wenn sie (noch) nicht in einer aktiven Spalte
-        # liegen. So verhindern wir, dass mehrere freigegebene Karten parallel
-        # anlaufen (jede hat einen eigenen Session-Key; das Gateway serialisiert
-        # nur pro Karte, nicht über Karten hinweg).
+        # In-Flight-Turns: Karten, deren Turn gerade aktiv läuft (send_typing
+        # gesehen, stop_typing noch nicht). Das ist die einzige zuverlässige
+        # Zählung — Karten in aktiven Spalten ohne laufenden Turn dürfen das
+        # Limit nicht blockieren.
         for cid in self._active_turns:
             if exclude_card_id and cid == exclude_card_id:
                 continue
