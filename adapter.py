@@ -1715,19 +1715,35 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             await self._auto_block_card(card_id)
             return
 
-        # Fix 1 (Adapter-Fallback): Ein Execute-Turn, der OHNE strukturelle
-        # Änderung endet, aber ein "warte auf menschliche Entscheidung"-Signal
-        # trägt, wird deterministisch nach 'review' verschoben — statt ewig in
-        # 'running' zu hängen und den WIP-Slot zu blockieren (der 119-Bug).
-        if (
-            phase == PHASE_EXECUTE
-            and action_count == 0
-            and self._run_has_review_intent(result)
-        ):
+        # Fix 1 (Adapter-Fallback): Ein Turn, der OHNE strukturelle Änderung
+        # endet, aber ein "warte auf menschliche Entscheidung"-Signal trägt,
+        # wird deterministisch nach 'review' verschoben — statt ewig in
+        # 'running'/'triage' zu hängen und den WIP-Slot zu blockieren (der
+        # 119-Bug). Gilt für BOTH Plan- und Execute-Phase: Auch in der
+        # Plan-Phase stellt der Agent Rückfragen (z. B. "welches VLAN?") und
+        # muss die Karte dann an den Menschen zurückgeben, nicht still enden.
+        if action_count == 0 and self._run_has_review_intent(result):
             moved, _ = await self._move_card_to_status(card_id, STATUS_REVIEW)
             if moved:
                 logger.info(
-                    "Deck: Karte %s nach 'review' verschoben — Agent wartet auf neue menschliche Freigabe (Review-Intent erkannt).",
+                    "Deck: Karte %s nach 'review' verschoben — Agent wartet auf menschliche Entscheidung (Review-Intent erkannt, Phase '%s').",
+                    card_id, phase,
+                )
+            await self._rebaseline_card(board_id, stack_id, card_id)
+            return
+
+        # Fix 1b (Adapter-Fallback, Plan-Phase): Ein Plan-Lauf, der OHNE
+        # strukturelle Änderung endet (kein deck_card_action), hat den Plan
+        # nicht in die Description geschrieben. Das ist fast immer ein
+        # "Agent hat Rückfragen / konnte nicht abschließen"-Fall. Statt die
+        # Karte still in Triage/Running hängen zu lassen (und den WIP-Slot zu
+        # blockieren), wird sie nach 'review' zurückgegeben — der Mensch sieht
+        # die offenen Fragen im Kommentar und kann antworten.
+        if phase == PHASE_PLAN and action_count == 0:
+            moved, _ = await self._move_card_to_status(card_id, STATUS_REVIEW)
+            if moved:
+                logger.info(
+                    "Deck: Karte %s (Phase 'plan') ohne deck_card_action nach 'review' verschoben — Plan nicht strukturell abgeschlossen (vermutlich offene Rückfragen).",
                     card_id,
                 )
             await self._rebaseline_card(board_id, stack_id, card_id)
