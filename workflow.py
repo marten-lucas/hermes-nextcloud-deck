@@ -171,6 +171,80 @@ TEMPLATE_CARD_TITLE = "Vorlage (Template)"
 # H1-Marker, der die Grenze zwischen Mensch- und Agent-Teil markiert.
 AGENT_WORKSPACE_MARKER = "Agent Workspace"
 
+# ---------------------------------------------------------------------------
+# Anker-Link-Erkennung: Nextcloud Deck rendert H1-Überschriften als
+#   # [#](#h-objective "Verweis zu diesem Abschnitt")Objective
+#   # [#](#h-agent-workspace "Verweis zu diesem Abschnitt")Agent Workspace
+# Der sichtbare Titel steht am ZEILENENDE (nach dem letzten ')' oder Leerzeichen).
+# Wir müssen den Marker robust erkennen, damit die Agent-Workspace-Sektion
+# NICHT dupliziert wird (sonst "Verdopplung" — der Bug bei Karte 120).
+# ---------------------------------------------------------------------------
+
+
+def _heading_title(line: str) -> str:
+    """Extrahiert den sichtbaren H1-Titel aus einer (ggf. anker-verlinkten) Zeile.
+
+    Beispiele:
+      "# Agent Workspace"                          -> "agent workspace"
+      "# [#](#h-agent-workspace \"…\")Agent Workspace" -> "agent workspace"
+      "# [#](#h-objective \"…\")Objective"         -> "objective"
+    """
+    stripped = (line or "").strip()
+    # Nur H1-Zeilen (genau ein '#' am Anfang) betrachten.
+    if not stripped.startswith("#") or stripped.startswith("##"):
+        return stripped.lstrip("#").strip()
+    s = stripped[1:].strip()
+    # Fall A: schlicht "# Titel"
+    if not s.startswith("["):
+        return s.strip()
+    # Fall B: Anker-Link "# [#](#...)Titel" — Titel steht nach dem letzten ')'
+    idx = s.rfind(")")
+    if idx != -1 and idx + 1 < len(s):
+        return s[idx + 1 :].strip()
+    return s.strip()
+
+
+def _is_heading(title: str, expected: str) -> bool:
+    return title.strip().lower() == expected.strip().lower()
+
+
+def split_agent_workspace(description: str) -> Tuple[str, Optional[str]]:
+    """Teilt die Description am "# Agent Workspace"-Marker.
+
+    Erkennt den Marker sowohl schlicht ("# Agent Workspace") als auch mit
+    Nextcloud-Anker-Link ("# [#](#h-agent-workspace …)Agent Workspace").
+
+    Rückgabe (human_part, agent_part):
+    - ``human_part``: alles VOR dem Marker (inkl. Marker-Zeile), byte-genau.
+    - ``agent_part``: alles NACH dem Marker (die H2-Agent-Sektionen), oder None,
+      wenn kein Marker vorhanden ist.
+    """
+    text = (description or "").rstrip("\n")
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if _is_heading(_heading_title(line), AGENT_WORKSPACE_MARKER):
+            human_part = "\n".join(lines[: i + 1]).rstrip()
+            agent_part = "\n".join(lines[i + 1 :]).strip()
+            return human_part, (agent_part or None)
+    return text, None
+
+
+def _present_human_sections(description: str) -> Set[str]:
+    """Ermittelt die vorhandenen Mensch-Teil-H1-Sektionen (lowercase).
+
+    Erkennt H1-Überschriften sowohl schlicht als auch mit Nextcloud-Anker-Link
+    ("# [#](#h-objective …)Objective").
+    """
+    text = (description or "").lower()
+    present: Set[str] = set()
+    human_lower = {s.lower() for s in HUMAN_SECTIONS}
+    lines = text.splitlines()
+    for line in lines:
+        title = _heading_title(line).strip().lower()
+        if title in human_lower:
+            present.add(title)
+    return present
+
 # Kern-Sektionen des Mensch-Teils (H1, sprachneutral).
 HUMAN_SECTIONS = (
     "Objective",
@@ -263,35 +337,6 @@ _TEMPLATE_PLACEHOLDER_MARKERS = (
 )
 
 
-def split_agent_workspace(description: str) -> Tuple[str, Optional[str]]:
-    """Teilt die Description am "# Agent Workspace"-Marker.
-
-    Rückgabe (human_part, agent_part):
-    - ``human_part``: alles VOR dem Marker (inkl. Marker-Zeile), byte-genau.
-    - ``agent_part``: alles NACH dem Marker (die H2-Agent-Sektionen), oder None,
-      wenn kein Marker vorhanden ist.
-    """
-    text = (description or "").rstrip("\n")
-    marker_line = f"# {AGENT_WORKSPACE_MARKER}"
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.strip() == marker_line:
-            human_part = "\n".join(lines[: i + 1]).rstrip()
-            agent_part = "\n".join(lines[i + 1 :]).strip()
-            return human_part, (agent_part or None)
-    return text, None
-
-
-def _present_human_sections(description: str) -> Set[str]:
-    """Ermittelt die vorhandenen Mensch-Teil-H1-Sektionen (lowercase)."""
-    text = (description or "").lower()
-    present: Set[str] = set()
-    for section in HUMAN_SECTIONS:
-        if f"# {section.lower()}" in text:
-            present.add(section.lower())
-    return present
-
-
 def missing_template_sections(description: str) -> List[str]:
     """Gibt die fehlenden Mensch-Teil-H1-Sektionen als leere Gerüst-Blöcke zurück.
 
@@ -330,7 +375,9 @@ def description_matches_template(description: str) -> bool:
         return False
     if missing_template_sections(text):
         return False
-    if f"# {AGENT_WORKSPACE_MARKER.lower()}" not in text.lower():
+    # Marker robust prüfen (auch Anker-Link-Form "# [#](#h-agent-workspace …)Agent Workspace").
+    _, agent_part = split_agent_workspace(text)
+    if agent_part is None:
         return False
     if any(m in text.lower() for m in _TEMPLATE_PLACEHOLDER_MARKERS):
         return False

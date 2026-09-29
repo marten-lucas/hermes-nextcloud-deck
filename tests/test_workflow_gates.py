@@ -312,6 +312,20 @@ class TestWorkflowLogic(unittest.TestCase):
         self.assertIsNone(agent2)
         self.assertEqual(human2, "# Objective\nZiel")
 
+        # Anker-Link-Form (Nextcloud Deck rendert H1 mit Anker):
+        #   # [#](#h-agent-workspace "…")Agent Workspace
+        anchored = (
+            "# [#](#h-objective \"Verweis zu diesem Abschnitt\")Objective\nZiel\n\n"
+            "# [#](#h-agent-workspace \"Verweis zu diesem Abschnitt\")Agent Workspace\n"
+            "## Subtasks\n- [ ] x"
+        )
+        human3, agent3 = split_agent_workspace(anchored)
+        self.assertIn("Agent Workspace", human3)
+        self.assertIn("# Objective", human3)
+        self.assertEqual(agent3.strip(), "## Subtasks\n- [ ] x")
+        # Kein Duplikat: der Marker soll EINMAL vorkommen, nicht angehängt werden.
+        self.assertEqual(human3.lower().count("agent workspace"), 1)
+
     def test_parse_subtasks_scoped(self):
         from workflow import parse_subtasks
 
