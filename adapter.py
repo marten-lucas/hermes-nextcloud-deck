@@ -428,7 +428,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             client=self.client,
             bot_aliases=self.runtime.bot_aliases,
         )
-        self.state = DeckStateManager()
+        self.state = DeckStateManager(
+            state_file=str(Path(__file__).resolve().parent / "state.json")
+        )
         self.presence_mgr = DeckPresenceManager(self.client)
         self.destructive_patterns = compile_destructive_patterns(
             self.runtime.destructive_tool_patterns
@@ -1421,10 +1423,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                     )
                     if not self.state.should_process(snapshot):
                         continue
-                    logger.info(
-                        "Deck: WIP-Zähler zählt Karte %s (Stack=%s, should_process=True)",
-                        cid, title,
-                    )
                     total += 1
         # In-Flight-Turns einbeziehen: Karten, deren Turn gerade aktiv läuft
         # (send_typing gesehen, stop_typing noch nicht), zählen ebenfalls gegen

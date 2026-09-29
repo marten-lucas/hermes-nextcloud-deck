@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -58,7 +59,7 @@ class DeckStateManager:
     als *neuer* Trigger wirken.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, state_file: Optional[str] = None) -> None:
         self._fingerprints: Dict[str, str] = {}
         # Letzter bekannter Workflow-Label-Zustand pro Karte (kanonische Keys),
         # um menschenseitige Label-Änderungen als Trigger zu erkennen — auch
@@ -68,9 +69,56 @@ class DeckStateManager:
         # nächsten Agent-Lauf nur die NEUEN Kommentare (id > Baseline) als
         # Kontext zu übergeben, statt nur den allerletzten.
         self._last_comment_ids: Dict[str, Optional[int]] = {}
+        # Persistenz: Der State wird in einer JSON-Datei gespeichert, damit er
+        # nach einem Gateway-Restart erhalten bleibt. Sonst gilt nach jedem
+        # Restart jede Karte in einer aktiven Spalte als "neu" (Fingerprint-
+        # Cache leer) und blockiert das WIP-Limit (siehe Karte 123 blockiert
+        # Karte 120 nach Restart).
+        self._state_file = state_file
+        if state_file:
+            self._load()
 
     def _key(self, board_id: str, card_id: str) -> str:
         return f"{board_id}:{card_id}"
+
+    def _load(self) -> None:
+        """Lädt den State aus der JSON-Datei (best-effort)."""
+        try:
+            if not self._state_file or not os.path.isfile(self._state_file):
+                return
+            with open(self._state_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self._fingerprints = dict(data.get("fingerprints") or {})
+            self._last_labels = {
+                k: list(v) for k, v in (data.get("last_labels") or {}).items()
+            }
+            self._last_comment_ids = {
+                k: (int(v) if v is not None else None)
+                for k, v in (data.get("last_comment_ids") or {}).items()
+            }
+        except Exception:
+            # Best-effort: Ein korrupter State darf den Adapter nicht blockieren.
+            self._fingerprints = {}
+            self._last_labels = {}
+            self._last_comment_ids = {}
+
+    def save(self) -> None:
+        """Persistiert den State in die JSON-Datei (best-effort)."""
+        if not self._state_file:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            data = {
+                "fingerprints": self._fingerprints,
+                "last_labels": self._last_labels,
+                "last_comment_ids": self._last_comment_ids,
+            }
+            tmp = self._state_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._state_file)
+        except Exception:
+            pass
 
     def last_processed_comment_id(self, board_id: str, card_id: str) -> Optional[int]:
         """Liefert die letzte Kommentar-ID, die bereits verarbeitet wurde.
@@ -108,6 +156,7 @@ class DeckStateManager:
                 self._last_comment_ids[self._key(snapshot.board_id, snapshot.card_id)] = int(str(snapshot.last_comment_id))
             except (ValueError, TypeError):
                 pass
+        self.save()
 
     def mark_seen(self, snapshot: DeckCardSnapshot) -> None:
         """Nur Dedupe-Baseline setzen (Fingerprint + Labels), ohne die
@@ -121,3 +170,4 @@ class DeckStateManager:
         key = self._key(snapshot.board_id, snapshot.card_id)
         self._fingerprints[key] = snapshot.fingerprint()
         self._last_labels[key] = list(snapshot.labels or [])
+        self.save()
