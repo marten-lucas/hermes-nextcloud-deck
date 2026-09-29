@@ -1779,6 +1779,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         )
         token = current_deck_context.set(workflow_ctx)
         action_token = current_deck_action_count.set(0)
+        # Speed-Heartbeat: Das Gateway ruft send_typing nur bei Progress-Messages
+        # auf (Deck sendet keine). Wir starten einen eigenen Heartbeat, der den
+        # Live-Status (Karte · Liest Kontext/Antwortet ⚡ t/s) während des Turns
+        # setzt. Wird nach dem Turn-Ende gestoppt.
+        speed_stop = asyncio.Event()
+        speed_task: Optional[asyncio.Task] = None
+        if self.runtime.speed_enabled:
+            speed_task = asyncio.create_task(
+                self._run_speed_heartbeat(session_key, speed_stop)
+            )
         try:
             if principal is not None:
                 with self.identity.principal_context(principal):
@@ -1793,6 +1803,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 "Deck: Agent-Run für Karte %s schlug fehl: %s", card_id, exc
             )
         finally:
+            # Speed-Heartbeat stoppen und aufräumen.
+            if speed_task is not None:
+                speed_stop.set()
+                try:
+                    await asyncio.wait_for(speed_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    speed_task.cancel()
             current_deck_context.reset(token)
             action_count = current_deck_action_count.get()
             current_deck_action_count.reset(action_token)
@@ -2334,6 +2351,41 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             logger.debug("Deck: Custom-Status beim stop_typing löschen fehlgeschlagen: %s", exc)
         finally:
             # In-Flight-Tracking: Turn dieser Karte ist beendet.
+            card_id = self._card_id_from_target(str(chat_id or ""))
+            if card_id:
+                self._active_turns.discard(card_id)
+
+    async def _run_speed_heartbeat(self, chat_id: str, stop_event: asyncio.Event) -> None:
+        """Eigener Speed-Heartbeat: setzt den Live-Status während eines Turns.
+
+        Das Gateway ruft ``send_typing`` nur auf, wenn es Progress-Messages gibt
+        (Deck sendet keine, weil es kein Typing-Konzept hat). Deshalb starten wir
+        hier einen eigenen Heartbeat, der ``send_typing`` alle paar Sekunden
+        aufruft, solange der Turn läuft (``stop_event`` nicht gesetzt).
+        """
+        if not self.runtime.speed_enabled:
+            return
+        try:
+            while not stop_event.is_set():
+                try:
+                    await self.send_typing(chat_id)
+                except Exception as exc:
+                    logger.debug("Deck: Speed-Heartbeat fehlgeschlagen: %s", exc)
+                # Kurz warten, dann erneut prüfen (kein fester Sleep, damit der
+                # Stop schnell greift).
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Turn-Ende: Status aufräumen (online + Custom-Status löschen).
+            try:
+                await self.presence_mgr.clear_custom_status_message(force=True)
+                await self.presence_mgr.set_presence_status("online")
+            except Exception as exc:
+                logger.debug("Deck: Speed-Heartbeat-Cleanup fehlgeschlagen: %s", exc)
             card_id = self._card_id_from_target(str(chat_id or ""))
             if card_id:
                 self._active_turns.discard(card_id)
