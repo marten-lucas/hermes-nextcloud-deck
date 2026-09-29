@@ -2203,8 +2203,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not speed:
             return
         suffix = self._speed_suffix(speed)
-        if not suffix:
-            return
         try:
             # Presence auf "busy" setzen — das Gateway ruft mark_turn_started/
             # finished NICHT auf, daher ist send_typing der einzige zuverlässige
@@ -2221,7 +2219,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             else:
                 action, icon = "Liest Kontext", "📖"
             prefix = f"{card_label} · {action}" if card_label else action
-            message = f"{prefix} ⚡ {suffix}"
+            # Speed-Suffix nur anhängen, wenn der Sidecar eine aktive Phase
+            # (prompt/generate) liefert. Bei "idle" (z.B. Stale nach 30s oder
+            # Heartbeat außerhalb des kurzen prompt-Fensters) bleibt der Status
+            # trotzdem auf der Aktion stehen — sonst überschreibt der
+            # send_or_update_status-Callback ("Liest Kontext" ohne Speed) den
+            # Status dauerhaft und die Prozent/Geschwindigkeit fehlen.
+            message = f"{prefix} ⚡ {suffix}" if suffix else prefix
             await self.presence_mgr.set_custom_status_message(message, icon)
         except Exception as exc:
             logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
