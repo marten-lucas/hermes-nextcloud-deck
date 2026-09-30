@@ -486,10 +486,26 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         # ein ungeeignetes Board darf das Gateway nicht blockieren).
         await self.check_board_suitability()
         # Presence: Bot-User als online melden + ggf. altes Custom-Status-Reset.
-        try:
-            await self.presence_mgr.set_presence_status("online")
-        except Exception as exc:
-            logger.debug("Deck: Presence online setzen fehlgeschlagen: %s", exc)
+        # Beim Gateway-Restart kann die Deck-API kurzzeitig noch nicht bereit
+        # sein (Timeout). Wir retryen mit kurzem Backoff, damit der Bot nicht
+        # dauerhaft als "offline" erscheint, obwohl der Gateway läuft.
+        for attempt in range(3):
+            try:
+                await self.presence_mgr.set_presence_status("online")
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    logger.warning(
+                        "Deck: Presence online setzen fehlgeschlagen (Versuch %d/3): %s",
+                        attempt + 1,
+                        exc,
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    logger.warning(
+                        "Deck: Presence online setzen fehlgeschlagen (3 Versuche): %s",
+                        exc,
+                    )
         return True
 
     async def _call_on_gateway_loop(self, coro_factory):
