@@ -438,11 +438,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         self._speed_session: Optional[aiohttp.ClientSession] = None
         self._last_speed: Optional[Dict[str, Any]] = None
         # In-Flight-Tracking: Karten, deren Turn gerade aktiv läuft (via
-        # send_typing/stop_typing). Wird in die WIP-Zählung einbezogen, damit
-        # das WIP-Limit auch BEREITS LAUFENDE Turns berücksichtigt — nicht nur
-        # den Stack-Zustand. Sonst laufen mehrere freigegebene Karten parallel
-        # (jede hat einen eigenen Session-Key, das Gateway serialisiert nur
-        # pro Karte, nicht über Karten hinweg).
+        # _process_card: add vor Turn-Start, discard im finally). Wird in die
+        # WIP-Zählung einbezogen, damit das WIP-Limit auch BEREITS LAUFENDE
+        # Turns berücksichtigt — nicht nur den Stack-Zustand. Sonst laufen
+        # mehrere freigegebene Karten parallel (jede hat einen eigenen
+        # Session-Key, das Gateway serialisiert nur pro Karte, nicht über
+        # Karten hinweg). Wichtig: UNABHÄNGIG vom Speed-Feature (FUNC-002),
+        # da send_typing bei speed_enabled=False early-returnt.
         self._active_turns: set[str] = set()
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
@@ -1390,10 +1392,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         if not self.runtime.max_in_progress:
             return 0
         total = 0
-        # In-Flight-Turns: Karten, deren Turn gerade aktiv läuft (send_typing
-        # gesehen, stop_typing noch nicht). Das ist die einzige zuverlässige
-        # Zählung — Karten in aktiven Spalten ohne laufenden Turn dürfen das
-        # Limit nicht blockieren.
+        # In-Flight-Turns: Karten, deren Turn gerade aktiv läuft (add in
+        # _process_card vor dem Agent-Run, discard im finally). Das ist die
+        # einzige zuverlässige Zählung — Karten in aktiven Spalten ohne
+        # laufenden Turn dürfen das Limit nicht blockieren. Unabhängig vom
+        # Speed-Feature (FUNC-002): send_typing allein füllt _active_turns
+        # nur, wenn speed_enabled=True.
         for cid in self._active_turns:
             if exclude_card_id and cid == exclude_card_id:
                 continue
@@ -1785,6 +1789,14 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             speed_task = asyncio.create_task(
                 self._run_speed_heartbeat(session_key, speed_stop)
             )
+        # WIP-Tracking: Diese Karte hat jetzt einen aktiven (in-flight) Turn.
+        # Wird in _count_active_cards einbezogen und ist UNABHÄNGIG vom
+        # Speed-Feature: send_typing() early-returnt bei speed_enabled=False
+        # und hätte _active_turns nie gefüllt — dadurch war das WIP-Limit
+        # (max_in_progress) unter der Default-Konfiguration faktisch wirkungslos
+        # (FUNC-002). Der Turn-Lifecycle (add/discard) gehört an die Stelle, wo
+        # der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
+        self._active_turns.add(card_id)
         try:
             if principal is not None:
                 with self.identity.principal_context(principal):
@@ -1809,6 +1821,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             current_deck_context.reset(token)
             action_count = current_deck_action_count.get()
             current_deck_action_count.reset(action_token)
+            # WIP-Tracking: Turn dieser Karte ist beendet. NACH dem Stoppen des
+            # Speed-Heartbeats (dessen send_typing könnte _active_turns erneut
+            # füllen — Set-Add ist idempotent, aber der Discard gehört am Ende,
+            # damit die Karte nicht „leakt"). Damit zählt der Turn unabhängig
+            # von speed_enabled gegen das WIP-Limit (FUNC-002).
+            self._active_turns.discard(card_id)
 
         # Auto-Block bei Run-Fehler: Produziert der Agent keine verwertbare
         # strukturelle Änderung (deck_card_action) und signalisiert die Antwort
