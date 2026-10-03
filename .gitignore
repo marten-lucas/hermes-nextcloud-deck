@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.pyc
@@ -8,6 +7,8 @@ __pycache__/
 # Tests
 .tests/
 
-#Reviews
+# Reviews
 reviews/
-```
+
+# Runtime state (OPS-001): Dedupe-/Label-Baseline — nie committen
+state.json

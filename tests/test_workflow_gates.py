@@ -321,7 +321,9 @@ class TestWorkflowLogic(unittest.TestCase):
         )
         human3, agent3 = split_agent_workspace(anchored)
         self.assertIn("Agent Workspace", human3)
-        self.assertIn("# Objective", human3)
+        # Anker-Form: "#" und Titel sind durch den Anker-Link getrennt, daher nur
+        # den Titel prüfen (konsistent zu L323 "Agent Workspace" ohne "#").
+        self.assertIn("Objective", human3)
         self.assertEqual(agent3.strip(), "## Subtasks\n- [ ] x")
         # Kein Duplikat: der Marker soll EINMAL vorkommen, nicht angehängt werden.
         self.assertEqual(human3.lower().count("agent workspace"), 1)
@@ -609,9 +611,17 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_auto_moves_to_review_on_description_without_target_status(self):
         """b-Fix: Beschreibung ohne target_status → deterministischer Auto-Move nach review."""
-        # 1. Aufruf: Auto-Move-Check (Quell-Stack 1); 2.: Move selbst; 3.: Verifikation (Ziel 3);
-        # weitere Aufrufe (z. B. Re-Baseline) → Ziel-Stack 3
-        self.adapter._locate_card = AsyncMock(side_effect=[("7", "1"), ("7", "1"), ("7", "3"), ("7", "3")])
+        # _locate_card-Aufrufe in diesem Flow (Karte startet in Stack 1 = 'todo',
+        # landet nach dem Auto-Move in Stack 3 = 'review'):
+        #   1. _auto_move_review_check            → ("7","1")  (Vor-Stufe-Check)
+        #   2. _move_card_to_status (vor Move)    → ("7","1")
+        #   3. _move_card_to_status (Verifikation)→ ("7","3")
+        #   4. Review-Norm: _remove_label_from_card → ("7","3")
+        #   5. Review-Norm: _apply_label_to_card    → ("7","3")
+        #   6. _update_card_description           → ("7","3")
+        self.adapter._locate_card = AsyncMock(
+            side_effect=[("7", "1"), ("7", "1"), ("7", "3"), ("7", "3"), ("7", "3"), ("7", "3")]
+        )
         # Karte in 'todo' (Stack 1), Phase plan, low risk → Auto-Move erlaubt
         self.adapter.client.get_card = AsyncMock(return_value={
             "labels": [{"title": "hermes/phase:plan"}, {"title": "hermes/risk:low"}]

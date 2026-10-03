@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -174,37 +175,83 @@ class DeckRuntimeConfig:
     speed_url: str = ""
 
 
+def _default_state_file() -> str:
+    """Pfad der persistenten Dedupe-/Label-Baseline (OPS-001).
+
+    Liegt OUTSIDE dem Plugin-Source-Verzeichnis (~/.hermes/nextcloud-deck/state.json),
+    damit die State-Datei (a) Plugin-Updates/git-pull übersteht und (b) nicht im
+    git-geprüften Projektverzeichnis landet. Der Hermes-Home ist der etablierte
+    Ort (vgl. ~/.hermes/.env, ~/.hermes/config.yaml).
+    """
+    return str(Path.home() / ".hermes" / "nextcloud-deck" / "state.json")
+
+
+def _parse_dotenv_line(line: str) -> Optional[tuple[str, str]]:
+    """Parst eine .env-Zeile (robuster Fallback ohne python-dotenv).
+
+    Handhabt `export ` -Präfix, volle und inline Kommentare sowie einfache
+    und doppelte Anführungszeichen. Rückgabe (key, value) oder None, wenn die
+    Zeile kein gültiges KV-Paar trägt (SEC-001). Multi-Line-Werte und
+    fortgeschrittene dotenv-Syntax (z. B. `$(...)`, Backticks) werden bewusst
+    nicht unterstützt.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped[:6].lower() == "export":
+        stripped = stripped[6:].lstrip()
+    if "=" not in stripped:
+        return None
+    key, _, raw = stripped.partition("=")
+    key = key.strip()
+    if not key:
+        return None
+    raw = raw.strip()
+    # Anführungszeichen: Inhalt wörtlich (inkl. Leerzeichen, ohne
+    # inline-Kommentar-Interpretation).
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        return key, raw[1:-1]
+    # Unquoted: inline-Kommentar abschneiden, einfache Escapes entschärfen.
+    comment = raw.find(" #")
+    if comment != -1:
+        raw = raw[:comment].rstrip()
+    raw = raw.replace('\\"', '"').replace("\\'", "'")
+    return key, raw.strip()
+
+
 def _load_dotenv_fallback() -> Dict[str, str]:
-    """Liest ~/.hermes/.env als Fallback ein (einmalig gecached).
+    """Liest ~/.hermes/.env als Fallback ein (mit mtime-basiertem Cache).
 
     Der Gateway-Prozess lädt die .env via dotenv in os.environ — aber
     Status-Konsumenten (Dashboard, `hermes status`) sind separate Prozesse.
     Damit is_connected()/check_is_connected() dort dieselbe Antwort liefern
     wie zur Gateway-Startzeit, wird die .env direkt gelesen.
+
+    Der Cache wird bei Änderung der Datei-MTime neu geladen (SEC-001), damit
+    .env-Änderungen auch ohne Prozess-Restart wirksam werden.
     """
     global _DOTENV_CACHE
-    if _DOTENV_CACHE is not None:
-        return _DOTENV_CACHE
+    env_path = Path.home() / ".hermes" / ".env"
+    try:
+        mtime = env_path.stat().st_mtime_ns if env_path.is_file() else None
+    except Exception:
+        mtime = None
+    if _DOTENV_CACHE is not None and _DOTENV_CACHE[0] == mtime:
+        return _DOTENV_CACHE[1]
     values: Dict[str, str] = {}
     try:
-        env_path = Path.home() / ".hermes" / ".env"
         if env_path.is_file():
             for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, raw = line.partition("=")
-                key = key.strip()
-                raw = raw.strip().strip('"').strip("'")
-                if key and raw:
-                    values.setdefault(key, raw)
+                pair = _parse_dotenv_line(line)
+                if pair:
+                    values.setdefault(pair[0], pair[1])
     except Exception:
-        pass
-    _DOTENV_CACHE = values
+        values = {}
+    _DOTENV_CACHE = (mtime, values)
     return values
 
 
-_DOTENV_CACHE: Optional[Dict[str, str]] = None
+_DOTENV_CACHE: Optional[tuple[Optional[int], Dict[str, str]]] = None
 
 
 def _env(name: str, *fallbacks: str) -> str:
@@ -224,6 +271,60 @@ def _env_bool(name: str, *fallbacks: str, default: bool = False) -> bool:
     if not value:
         return default
     return value in ("1", "true", "yes", "on", "y", "ja", "an")
+
+
+def _keys_from(obj: Any) -> Optional[List[str]]:
+    """Normalisiert ein Store-Attribut/Rückgabe zu einer Liste von String-Keys.
+
+    Akzeptiert dict, list/tuple/set (auch mit (key, …)-Tupeln) und beliebige
+    Iterables. Rückgabe None, wenn keine Keys extrahiert werden können.
+    """
+    if obj is None or isinstance(obj, str):
+        return None
+    if isinstance(obj, dict):
+        return [k for k in obj if isinstance(k, str)]
+    if isinstance(obj, (list, tuple, set)):
+        keys: List[str] = []
+        for item in obj:
+            if isinstance(item, str):
+                keys.append(item)
+            elif isinstance(item, (tuple, list)) and item and isinstance(item[0], str):
+                keys.append(item[0])
+        return keys
+    try:
+        return _keys_from(list(obj))
+    except Exception:
+        return None
+
+
+def _session_store_keys(store: Any) -> Optional[List[str]]:
+    """Liest die Session-Keys des Gateway-Session-Stores (API-001).
+
+    Bevorzugt eine *öffentliche* Enumerierungs-API (`keys`/`iter_keys`/
+    `list_keys`/`all_keys`/`entries`/`items`), die über Hermes-Updates hinweg
+    stabiler sein sollte als interne Strukturen. Erst wenn keine öffentliche
+    API vorliegt, wird auf die bisherige private Struktur `_entries`
+    zurückgegriffen — das aktuelle Verhalten bleibt damit erhalten.
+
+    Idealerweise bietet das Gateway eine stabile, öffentliche Key-Enumeration
+    an; der Fallback auf `_entries` ist nur der defensive Absicherungsfall.
+    Rückgabe None, wenn keine Keys lesbar sind.
+    """
+    for name in ("keys", "iter_keys", "list_keys", "all_keys", "entries", "items"):
+        candidate = getattr(store, name, None)
+        if candidate is None:
+            continue
+        if callable(candidate):
+            try:
+                candidate = candidate()
+            except Exception as exc:
+                logger.debug("Deck: store.%s() nicht aufrufbar: %s", name, exc)
+                continue
+        keys = _keys_from(candidate)
+        if keys is not None:
+            return keys
+    # Letzter Rückfall: bisherige private Struktur (API-001-Fallback).
+    return _keys_from(getattr(store, "_entries", None))
 
 
 def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
@@ -428,9 +529,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             client=self.client,
             bot_aliases=self.runtime.bot_aliases,
         )
-        self.state = DeckStateManager(
-            state_file=str(Path(__file__).resolve().parent / "state.json")
-        )
+        self.state = DeckStateManager(state_file=_default_state_file())
         self.presence_mgr = DeckPresenceManager(self.client)
         self.destructive_patterns = compile_destructive_patterns(
             self.runtime.destructive_tool_patterns
@@ -544,18 +643,13 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         store = getattr(self, "_session_store", None)
         if store is None:
             return
-        # Session-Store-Einträge mit Deck-Karten-Keys sammeln.
-        try:
-            entries = getattr(store, "_entries", None)
-            if not isinstance(entries, dict):
-                return
-            deck_keys = [
-                key for key in entries
-                if isinstance(key, str) and "deck:board:" in key
-            ]
-        except Exception as exc:
-            logger.debug("Deck: Session-Store-Einträge nicht lesbar: %s", exc)
+        # Session-Keys sammeln: öffentliche Enumerierungs-API bevorzugen,
+        # erst dann auf die interne Struktur zurückfallen (API-001).
+        all_keys = _session_store_keys(store)
+        if all_keys is None:
+            logger.debug("Deck: Session-Store-Keys nicht lesbar")
             return
+        deck_keys = [key for key in all_keys if "deck:board:" in key]
         if not deck_keys:
             return
         # Karten in End-Spalten/Backlog identifizieren (pro Board einmal laden).
@@ -1376,6 +1470,23 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         "triage",
     }
 
+    @asynccontextmanager
+    async def _active_turn(self, card_id: str):
+        """WIP-Tracking: registriert den Turn dieser Karte als in-flight und
+        entfernt ihn beim Verlassen des Blocks — auch bei Exception (kein Leak).
+
+        UNABHÄNGIG vom Speed-Feature: send_typing() early-returnt bei
+        speed_enabled=False und hätte _active_turns nie gefüllt; dadurch war das
+        WIP-Limit (max_in_progress) unter der Default-Konfiguration faktisch
+        wirkungslos (FUNC-002). Der Turn-Lifecycle (add/discard) gehört an die
+        Stelle, wo der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
+        """
+        self._active_turns.add(card_id)
+        try:
+            yield
+        finally:
+            self._active_turns.discard(card_id)
+
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
         """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
 
@@ -1789,44 +1900,39 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             speed_task = asyncio.create_task(
                 self._run_speed_heartbeat(session_key, speed_stop)
             )
-        # WIP-Tracking: Diese Karte hat jetzt einen aktiven (in-flight) Turn.
-        # Wird in _count_active_cards einbezogen und ist UNABHÄNGIG vom
-        # Speed-Feature: send_typing() early-returnt bei speed_enabled=False
-        # und hätte _active_turns nie gefüllt — dadurch war das WIP-Limit
-        # (max_in_progress) unter der Default-Konfiguration faktisch wirkungslos
-        # (FUNC-002). Der Turn-Lifecycle (add/discard) gehört an die Stelle, wo
-        # der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
-        self._active_turns.add(card_id)
-        try:
-            if principal is not None:
-                with self.identity.principal_context(principal):
+        # WIP-Tracking: Turn dieser Karte registrieren (add vor dem Agent-Run,
+        # discard am Ende). Siehe _active_turn — UNABHÄNGIG vom Speed-Feature
+        # (FUNC-002): send_typing() early-returnt bei speed_enabled=False und
+        # hätte _active_turns nie gefüllt; der Turn-Lifecycle gehört an die
+        # Stelle, wo der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
+        async with self._active_turn(card_id):
+            try:
+                if principal is not None:
+                    with self.identity.principal_context(principal):
+                        result = self.handle_message(event)
+                else:
                     result = self.handle_message(event)
-            else:
-                result = self.handle_message(event)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception as exc:
-            run_error = str(exc)
-            logger.warning(
-                "Deck: Agent-Run für Karte %s schlug fehl: %s", card_id, exc
-            )
-        finally:
-            # Speed-Heartbeat stoppen und aufräumen.
-            if speed_task is not None:
-                speed_stop.set()
-                try:
-                    await asyncio.wait_for(speed_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    speed_task.cancel()
-            current_deck_context.reset(token)
-            action_count = current_deck_action_count.get()
-            current_deck_action_count.reset(action_token)
-            # WIP-Tracking: Turn dieser Karte ist beendet. NACH dem Stoppen des
-            # Speed-Heartbeats (dessen send_typing könnte _active_turns erneut
-            # füllen — Set-Add ist idempotent, aber der Discard gehört am Ende,
-            # damit die Karte nicht „leakt"). Damit zählt der Turn unabhängig
-            # von speed_enabled gegen das WIP-Limit (FUNC-002).
-            self._active_turns.discard(card_id)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                run_error = str(exc)
+                logger.warning(
+                    "Deck: Agent-Run für Karte %s schlug fehl: %s", card_id, exc
+                )
+            finally:
+                # Speed-Heartbeat stoppen und aufräumen. Läuft BEVOR _active_turn
+                # die Karte discardet: der inneren finally-Block endet vor dem
+                # Context-Manager-Auftritt, d. h. der Discard folgt dem Stop —
+                # dieselbe Reihenfolge wie zuvor (Karte darf nicht „leaken").
+                if speed_task is not None:
+                    speed_stop.set()
+                    try:
+                        await asyncio.wait_for(speed_task, timeout=5.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        speed_task.cancel()
+                current_deck_context.reset(token)
+                action_count = current_deck_action_count.get()
+                current_deck_action_count.reset(action_token)
 
         # Auto-Block bei Run-Fehler: Produziert der Agent keine verwertbare
         # strukturelle Änderung (deck_card_action) und signalisiert die Antwort
