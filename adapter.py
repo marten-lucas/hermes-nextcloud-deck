@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,23 +24,15 @@ try:
         APPROVAL_APPROVED,
         APPROVAL_REQUIRED,
         build_capabilities_prompt,
-        canonical_label_key,
-        check_agent_label_gate,
         check_agent_status_gate,
         configure_friendly_labels,
         friendly_label_title,
         has_workflow_label_change,
-        TEMPLATE_CARD_TITLE,
-        template_description,
-        AGENT_WORKSPACE_MARKER,
-        split_agent_workspace,
         DEFAULT_TEMPLATE_LANGUAGE,
         TEMPLATE_LANGUAGES,
-        missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         STATUS_RUNNING,
-        STATUS_BLOCKED,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -67,23 +58,15 @@ except ImportError:  # direct test/import
         APPROVAL_APPROVED,
         APPROVAL_REQUIRED,
         build_capabilities_prompt,
-        canonical_label_key,
-        check_agent_label_gate,
         check_agent_status_gate,
         configure_friendly_labels,
         friendly_label_title,
         has_workflow_label_change,
-        TEMPLATE_CARD_TITLE,
-        template_description,
-        AGENT_WORKSPACE_MARKER,
-        split_agent_workspace,
         DEFAULT_TEMPLATE_LANGUAGE,
         TEMPLATE_LANGUAGES,
-        missing_template_sections,
         FRIENDLY_LABELS,
         STATUS_REVIEW,
         STATUS_RUNNING,
-        STATUS_BLOCKED,
         compile_destructive_patterns,
         current_deck_context,
         current_deck_action_count,
@@ -96,6 +79,79 @@ except ImportError:  # direct test/import
         is_terminal_stack,
         parse_subtasks,
     )
+
+try:
+    from .execution import (
+        apply_label_to_card,
+        assign_user_to_card,
+        auto_block_card,
+        locate_card,
+        move_card_to_status,
+        normalize_label_conflicts,
+        remove_label_from_card,
+        remove_xor_siblings,
+        resolve_target_stack_id,
+        run_has_block_intent,
+        run_has_failure_signal,
+        run_has_review_intent,
+        unassign_user_from_card,
+        update_card_description,
+        xor_group_of,
+    )
+    from .formatting import (
+        card_status_label,
+        ensure_backlog_template,
+        fetch_speed,
+        map_progress_status,
+        run_speed_heartbeat,
+        speed_suffix,
+    )
+    from .ingestion import (
+        card_label_titles,
+        comment_id,
+        last_comment_author,
+        new_comments_since_baseline,
+        poll_once,
+        polling_loop,
+        rebaseline_card,
+    )
+    from .wip import active_turn, card_is_triggered, count_active_cards
+except ImportError:  # direct test/import
+    from execution import (
+        apply_label_to_card,
+        assign_user_to_card,
+        auto_block_card,
+        locate_card,
+        move_card_to_status,
+        normalize_label_conflicts,
+        remove_label_from_card,
+        remove_xor_siblings,
+        resolve_target_stack_id,
+        run_has_block_intent,
+        run_has_failure_signal,
+        run_has_review_intent,
+        unassign_user_from_card,
+        update_card_description,
+        xor_group_of,
+    )
+    from formatting import (
+        card_status_label,
+        ensure_backlog_template,
+        fetch_speed,
+        map_progress_status,
+        run_speed_heartbeat,
+        speed_suffix,
+    )
+    from ingestion import (
+        card_label_titles,
+        comment_id,
+        last_comment_author,
+        new_comments_since_baseline,
+        poll_once,
+        polling_loop,
+        rebaseline_card,
+    )
+    from wip import active_turn, card_is_triggered, count_active_cards
 
 try:
     from gateway.config import Platform, PlatformConfig  # type: ignore
@@ -1037,132 +1093,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return None
 
     async def _update_card_description(self, card_id: str, description: str) -> bool:
-        """Aktualisiert den AGENT-WORKSPACE-Teil der Karten-Beschreibung.
-
-        Der Agent sendet nur den Inhalt seiner Agent-Sektionen (die ``##``-
-        Blöcke unterhalb des ``# Agent Workspace``-Markers). Dieser Handler
-        ersetzt ausschließlich den Teil AB dem Marker — der Mensch-Teil
-        (Objective/Context/Constraints/Acceptance Criteria) bleibt byte-genau
-        erhalten. Ist noch kein Marker vorhanden (z. B. alte Karte), wird er
-        zusammen mit dem Agent-Inhalt angehängt.
-
-        Truncation-Absicherung: Ist der neue Agent-Teil ein bloßes Präfix des
-        bestehenden Agent-Teils (Abruch mitten im Schreiben), wird er verworfen.
-        """
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False
-        board_id, stack_id = location
-
-        new_agent = (description or "").strip()
-
-        try:
-            current_card = await self.client.get_card(board_id, stack_id, card_id)
-            existing = str((current_card or {}).get("description") or "")
-        except NextcloudDeckError:
-            existing = ""
-
-        human_part, old_agent = split_agent_workspace(existing)
-
-        # Truncation-Verdacht: neuer Agent-Teil ist ein Präfix des bisherigen.
-        if old_agent and new_agent:
-            old_agent_stripped = old_agent.strip()
-            head = old_agent_stripped[: max(1, len(new_agent))]
-            if len(new_agent) < len(old_agent_stripped) and head == new_agent:
-                logger.warning(
-                    "Deck: Agent-Workspace-Update für Karte %s verworfen — neuer Text ist ein abgeschnittenes Präfix (Truncation-Verdacht).",
-                    card_id,
-                )
-                return False
-
-        # Zusammenbauen: Mensch-Teil + Marker + neuer Agent-Teil.
-        marker_line = f"# {AGENT_WORKSPACE_MARKER}"
-        if old_agent is None and human_part:
-            # Kein Agent-Workspace-Marker vorhanden (Alt-Karte im alten Template):
-            # Marker explizit einfügen, damit Folge-Updates den Agent-Teil
-            # sauber finden und ersetzen können statt erneut anzuhängen.
-            new_description = f"{human_part.rstrip()}\n\n{marker_line}\n\n{new_agent}".rstrip()
-        elif human_part:
-            # human_part enthält bereits die Marker-Zeile (aus split_agent_workspace).
-            new_description = f"{human_part.rstrip()}\n\n{new_agent}".rstrip()
-        else:
-            new_description = f"{marker_line}\n\n{new_agent}".rstrip()
-
-        if not new_description:
-            return False
-
-        try:
-            result = await self.client.update_card(board_id, stack_id, card_id, description=new_description)
-            return result is not None
-        except NextcloudDeckError as exc:
-            logger.warning("Deck description update failed for card %s: %s", card_id, exc)
-            return False
+        """Aktualisiert den AGENT-WORKSPACE-Teil der Karten-Beschreibung (→ execution.py)."""
+        return await update_card_description(self, card_id, description)
 
     async def _move_card_to_status(self, card_id: str, status_key: str) -> tuple[bool, Optional[str]]:
-        """Verschiebt die Karte in den Ziel-Stack mit Berücksichtigung von Workflow-Gates."""
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False, f"Card {card_id} could not be located"
-        board_id, stack_id = location
-
-        # Karte laden, um aktuelle Phase / Approval-Status zu prüfen
-        current_card = await self.client.get_card(board_id, stack_id, card_id)
-        if current_card:
-            hermes_labels = extract_hermes_labels(current_card)
-            phase = hermes_labels.get("phase") or PHASE_PLAN
-            approval = hermes_labels.get("approval")
-            task_type = hermes_labels.get("type")
-            risk = hermes_labels.get("risk")
-            allowed, reason = check_agent_status_gate(status_key, phase, approval, task_type, risk)
-            if not allowed:
-                logger.warning("Deck: Gate-Sperre für Karte %s (Move nach '%s'): %s", card_id, status_key, reason)
-                return False, reason
-
-        # Ziel-Stack ermitteln: Board-Konfiguration (status_mapping) oder Stack-Titel-Match
-        target_stack_id = await self._resolve_target_stack_id(board_id, status_key)
-        if not target_stack_id:
-            logger.warning("Deck: kein Ziel-Stack für Status '%s' in Board %s konfiguriert", status_key, board_id)
-            return False, f"No target stack found for status '{status_key}'"
-
-        try:
-            result = await self.client.move_card(board_id, stack_id, card_id, target_stack_id)
-            if result is None:
-                return False, f"Move of card {card_id} to stack {target_stack_id} failed (empty response)"
-            # Verifikation: Die Deck-API kann Moves still fehlschlagen lassen
-            # (HTTP 200, aber keine Änderung). Daher den tatsächlichen Stack
-            # nach dem Move prüfen (curl-verifiziert 2026-09-09).
-            verify_location = await self._locate_card(card_id)
-            if verify_location is not None:
-                _, actual_stack_id = verify_location
-                if str(actual_stack_id) != str(target_stack_id):
-                    logger.warning(
-                        "Deck: Move-Verifikation fehlgeschlagen für Karte %s: erwartet Stack %s, tatsächlich %s",
-                        card_id, target_stack_id, actual_stack_id,
-                    )
-                    return False, f"Card {card_id} did not move to stack {target_stack_id} (silent API failure)"
-            # Konzept 2 (I3): Ein Move nach 'review' bedeutet "wartet auf
-            # (erneute) Freigabe". Deterministsch den Alt-Zustand bereinigen:
-            # phase:execute entfernen (Karte ist nicht mehr aktiv in Umsetzung)
-            # und approval:approved entfernen + approval:required setzen — die
-            # alte Freigabe ist verbraucht, es wird eine neue angefordert.
-            # Dadurch trägt eine Review-Karte nie mehr "🚀 In Umsetzung" oder
-            # "✔️ Freigabe erteilt" zusätzlich zum "⌛ Freigabe nötig".
-            status_norm = str(status_key or "").strip().lower()
-            if status_norm == STATUS_REVIEW:
-                try:
-                    await self._remove_label_from_card(card_id, f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}")
-                    await self._apply_label_to_card(card_id, f"approval:{APPROVAL_REQUIRED}")
-                except Exception as exc:
-                    logger.debug("Deck: Review-Normalisierung für Karte %s fehlgeschlagen: %s", card_id, exc)
-
-            logger.info(
-                "Deck: Karte %s nach Stack %s ('%s') verschoben und verifiziert.",
-                card_id, target_stack_id, status_key,
-            )
-            return True, None
-        except NextcloudDeckError as exc:
-            logger.warning("Deck card move failed for card %s: %s", card_id, exc)
-            return False, str(exc)
+        """Verschiebt die Karte in den Ziel-Stack mit Berücksichtigung von Workflow-Gates (→ execution.py)."""
+        return await move_card_to_status(self, card_id, status_key)
 
     # ------------------------------------------------------------------
     # Label-Gruppen-Invarianten (Konzept 2).
@@ -1180,14 +1116,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
     )
 
     def _xor_group_of(self, canonical_key: Optional[str]) -> Optional[tuple[str, str]]:
-        """Liefert die XOR-Gruppe (Paar kanonischer Keys), zu der ``canonical_key``
-        gehört, oder None, wenn der Key keiner Gruppe angehört."""
-        if not canonical_key:
-            return None
-        for group in self._LABEL_XOR_GROUPS:
-            if canonical_key in group:
-                return group
-        return None
+        """Liefert die XOR-Gruppe zu ``canonical_key`` (→ execution.py)."""
+        return xor_group_of(self, canonical_key)
 
     async def _remove_xor_siblings(
         self,
@@ -1195,265 +1125,36 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         canonical_key: str,
         except_sibling: Optional[str] = None,
     ) -> None:
-        """Entfernt die Schwester-Labels derselben XOR-Gruppe von einer Karte.
-
-        Setzt man z. B. ``phase:execute``, wird ``phase:plan`` entfernt; setzt
-        man ``approval:required``, wird ``approval:approved`` entfernt. Dadurch
-        kann auf einer Karte nie mehr als EIN Label pro Gruppe liegen — das
-        Label-Chaos (🚀 + ⌛ + ✔️ zugleich) ist strukturell ausgeschlossen.
-        Best-effort: Fehler werden geloggt, niemals geworfen.
-        """
-        group = self._xor_group_of(canonical_key)
-        if not group:
-            return
-        for sibling in group:
-            if sibling == canonical_key:
-                continue
-            if except_sibling and sibling == except_sibling:
-                continue
-            try:
-                removed = await self._remove_label_from_card(card_id, sibling)
-                if removed:
-                    logger.info(
-                        "Deck: XOR-Invariante — '%s' entfernt (Konflikt mit '%s') auf Karte %s.",
-                        sibling, canonical_key, card_id,
-                    )
-            except Exception as exc:
-                logger.debug("Deck: XOR-Entfernung '%s' auf Karte %s fehlgeschlagen: %s", sibling, card_id, exc)
+        """Entfernt die Schwester-Labels derselben XOR-Gruppe von einer Karte (→ execution.py)."""
+        await remove_xor_siblings(self, card_id, canonical_key, except_sibling)
 
     async def _normalize_label_conflicts(self, card_id: str) -> None:
-        """Poll-seitige Normalisierung (Konzept 2, Punkt 3): erkennt und bereinigt
-        widersprüchliche Label-Paare auf einer Karte IDEMPOTENT, ohne auf einen
-        Agent-Lauf warten zu müssen.
-
-        Regel (Best-effort, deterministisch): Der aktuelle/menschliche Zustand
-        gewinnt. Bei einem Konflikt in der Phase-Gruppe gewinnt ``execute``;
-        bei der Approval-Gruppe gewinnt ``required`` (eine erneute Freigabe-
-        Anforderung invalidiert die alte Freigabe).
-        """
-        location = await self._locate_card(card_id)
-        if location is None:
-            return
-        board_id, stack_id = location
-        try:
-            current_card = await self.client.get_card(board_id, stack_id, card_id)
-        except NextcloudDeckError:
-            return
-        if not current_card:
-            return
-        label_keys = set()
-        for lbl in (current_card.get("labels") or []):
-            key = canonical_label_key(str(lbl.get("title") or ""))
-            if key:
-                label_keys.add(key)
-        # Phase: execute gewinnt gegen plan
-        phase_execute = f"{LABEL_PREFIX_PHASE}{PHASE_EXECUTE}"
-        phase_plan = f"{LABEL_PREFIX_PHASE}{PHASE_PLAN}"
-        if phase_execute in label_keys and phase_plan in label_keys:
-            await self._remove_label_from_card(card_id, phase_plan)
-            logger.info("Deck: Label-Konflikt bereinigt — 'phase:plan' entfernt (execute gewinnt) auf Karte %s.", card_id)
-        # Approval: required gewinnt gegen approved
-        approval_required = f"approval:{APPROVAL_REQUIRED}"
-        approval_approved = f"approval:{APPROVAL_APPROVED}"
-        if approval_required in label_keys and approval_approved in label_keys:
-            await self._remove_label_from_card(card_id, approval_approved)
-            logger.info("Deck: Label-Konflikt bereinigt — 'approval:approved' entfernt (required gewinnt) auf Karte %s.", card_id)
+        """Poll-seitige idempotente Label-Konflikt-Bereinigung (→ execution.py)."""
+        await normalize_label_conflicts(self, card_id)
 
     async def _apply_label_to_card(self, card_id: str, label_title: str) -> tuple[bool, Optional[str]]:
-        """Weist der Karte ein Label zu (erstellt das Label bei Bedarf auf dem Board).
-
-        Akzeptiert Friendly-Titel ("⌛ Freigabe nötig") und kanonische Keys
-        ("approval:required") sowie die alte technische Form ("hermes/approval:required").
-        Im Board wird das Label immer im Friendly-Format mit Mapping-Farbe angelegt.
-        """
-        # Kanonischen Key auflösen; unbekannte Labels unverändert durchreichen
-        canonical_key = canonical_label_key(label_title)
-        board_title = friendly_label_title(canonical_key) if canonical_key else label_title
-
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False, "Card could not be located"
-        board_id, stack_id = location
-
-        current_card = await self.client.get_card(board_id, stack_id, card_id)
-        if current_card:
-            # Idempotenz: Ist das Label (in irgendeiner Schreibweise) bereits
-            # auf der Karte, ist die Zuweisung ein No-Op.
-            existing_keys = {
-                canonical_label_key(str(lbl.get("title") or "")) or str(lbl.get("title") or "").strip().lower()
-                for lbl in (current_card.get("labels") or [])
-                if isinstance(lbl, dict)
-            }
-            target_key = canonical_key or board_title.strip().lower()
-            if target_key in existing_keys:
-                logger.debug("Deck: Label '%s' ist bereits auf Karte %s — übersprungen.", board_title, card_id)
-                return True, None
-
-            hermes_labels = extract_hermes_labels(current_card)
-            phase = hermes_labels.get("phase") or PHASE_PLAN
-            approval = hermes_labels.get("approval")
-            task_type = hermes_labels.get("type")
-            risk = hermes_labels.get("risk")
-            allowed, reason = check_agent_label_gate(label_title, phase, approval, task_type, risk)
-            if not allowed:
-                logger.warning("Deck: Label-Gate-Sperre für Karte %s: %s", card_id, reason)
-                return False, reason
-
-        board_labels = await self.client.get_board_labels(board_id)
-        target_label_id = None
-        for lbl in board_labels:
-            lbl_key = canonical_label_key(str(lbl.get("title") or ""))
-            if lbl_key and lbl_key == canonical_key:
-                target_label_id = lbl.get("id")
-                break
-            if not lbl_key and str(lbl.get("title") or "").strip().lower() == board_title.strip().lower():
-                target_label_id = lbl.get("id")
-                break
-
-        # Wenn Label noch nicht auf dem Board existiert: anlegen (Friendly-Titel + Mapping-Farbe)
-        if target_label_id is None:
-            color = "317CCC"
-            if canonical_key and canonical_key in FRIENDLY_LABELS:
-                color = FRIENDLY_LABELS[canonical_key][1]
-            try:
-                new_lbl = await self.client.create_board_label(board_id, board_title, color=color)
-            except NextcloudDeckError as exc:
-                # Z. B. HTTP 403: Der Bot-User hat nur permissionEdit (nicht
-                # permissionManage) und darf keine Board-Labels anlegen. Das darf
-                # den Poll-Zyklus NICHT crashen — sauber als Fehlschlag melden.
-                logger.warning(
-                    "Deck: Konnte Label '%s' auf Board %s nicht anlegen (%s) — Label-Zuweisung übersprungen.",
-                    board_title, board_id, exc,
-                )
-                return False, str(exc)
-            if new_lbl and new_lbl.get("id"):
-                target_label_id = new_lbl["id"]
-
-        if target_label_id is None:
-            return False, f"Could not create/find label '{label_title}' on board {board_id}"
-
-        try:
-            res = await self.client.assign_label(board_id, stack_id, card_id, int(target_label_id))
-        except NextcloudDeckError as exc:
-            # Wenn bereits zugewiesen, als Erfolg werten
-            if "already assigned" in str(exc).lower():
-                return True, None
-            logger.warning("Deck assign_label failed for card %s: %s", card_id, exc)
-            return False, str(exc)
-
-        # XOR-Invariante (Konzept 2): Nach erfolgreicher Zuweisung die
-        # Schwester-Labels derselben Gruppe entfernen, damit z. B. beim Setzen
-        # von 'approval:required' ein altes 'approval:approved' sofort
-        # verschwindet — kein Label-Chaos möglich.
-        if canonical_key:
-            await self._remove_xor_siblings(card_id, canonical_key)
-
-        return res is not None, None
+        """Weist der Karte ein Label zu (erstellt es bei Bedarf; mit Gate) (→ execution.py)."""
+        return await apply_label_to_card(self, card_id, label_title)
 
     async def _remove_label_from_card(self, card_id: str, label_title: str) -> bool:
-        """Entfernt ein Label von der Karte (Friendly-Titel oder kanonischer Key)."""
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False
-        board_id, stack_id = location
-
-        canonical_key = canonical_label_key(label_title)
-        board_labels = await self.client.get_board_labels(board_id)
-        target_label_id = None
-        for lbl in board_labels:
-            lbl_key = canonical_label_key(str(lbl.get("title") or ""))
-            if canonical_key and lbl_key == canonical_key:
-                target_label_id = lbl.get("id")
-                break
-            if str(lbl.get("title") or "").strip().lower() == label_title.strip().lower():
-                target_label_id = lbl.get("id")
-                break
-
-        if target_label_id is None:
-            return False
-
-        try:
-            res = await self.client.remove_label(board_id, stack_id, card_id, int(target_label_id))
-            return res is not None
-        except NextcloudDeckError as exc:
-            logger.warning("Deck remove_label failed for card %s: %s", card_id, exc)
-            return False
+        """Entfernt ein Label von der Karte (Friendly-Titel oder kanonischer Key) (→ execution.py)."""
+        return await remove_label_from_card(self, card_id, label_title)
 
     async def _assign_user_to_card(self, card_id: str, user_id: str) -> bool:
-        """Weist einen Benutzer der Karte zu (löst Username -> UID auf)."""
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False
-        board_id, stack_id = location
-
-        # Username/Display-Name -> Nextcloud-UID auflösen (Handoff an Menschen).
-        resolved = await self.identity.resolve_user_uid(user_id)
-        if resolved:
-            user_id = resolved
-
-        try:
-            res = await self.client.assign_user(board_id, stack_id, card_id, user_id)
-            return res is not None
-        except NextcloudDeckError as exc:
-            if "already assigned" in str(exc).lower():
-                return True
-            logger.warning("Deck assign_user failed for card %s: %s", card_id, exc)
-            return False
+        """Weist einen Benutzer der Karte zu (löst Username -> UID auf) (→ execution.py)."""
+        return await assign_user_to_card(self, card_id, user_id)
 
     async def _unassign_user_from_card(self, card_id: str, user_id: str) -> bool:
-        """Entfernt einen Benutzer von der Karte."""
-        location = await self._locate_card(card_id)
-        if location is None:
-            return False
-        board_id, stack_id = location
-        try:
-            res = await self.client.unassign_user(board_id, stack_id, card_id, user_id)
-            return res is not None
-        except NextcloudDeckError as exc:
-            logger.warning("Deck unassign_user failed for card %s: %s", card_id, exc)
-            return False
+        """Entfernt einen Benutzer von der Karte (→ execution.py)."""
+        return await unassign_user_from_card(self, card_id, user_id)
 
     async def _locate_card(self, card_id: str) -> Optional[tuple[str, str]]:
-        """Findet (board_id, stack_id) einer Karte über die konfigurierten Boards."""
-        try:
-            boards = await self.client.get_boards()
-        except NextcloudDeckError as exc:
-            logger.warning("Deck: Boards konnten nicht geladen werden: %s", exc)
-            return None
-        for board in boards if isinstance(boards, list) else []:
-            board_id = str(board.get("id") or "").strip()
-            if not board_id or (self.runtime.boards and board_id not in self.runtime.boards):
-                continue
-            try:
-                stacks = await self.client.get_stacks(board_id)
-            except NextcloudDeckError:
-                continue
-            for stack in stacks if isinstance(stacks, list) else []:
-                stack_id = str(stack.get("id") or "").strip()
-                for card in stack.get("cards") or []:
-                    if str(card.get("id") or "") == card_id:
-                        return board_id, stack_id
-        return None
+        """Findet (board_id, stack_id) einer Karte über die konfigurierten Boards (→ execution.py)."""
+        return await locate_card(self, card_id)
 
     async def _resolve_target_stack_id(self, board_id: str, status_key: str) -> Optional[str]:
-        """Löst einen Status-Schlüssel zu einer Stack-ID auf (Board-Config 'status_mapping' oder Stack-Titel)."""
-        config = self._configured_board(board_id) or {}
-        mapping = config.get("status_mapping") or config.get("stack_mapping") or {}
-        if isinstance(mapping, dict):
-            target = mapping.get(status_key) or mapping.get(status_key.lower())
-            if target:
-                return str(target).strip()
-
-        # Fallback: Stack-Titel-Match (case-insensitive)
-        try:
-            stacks = await self.client.get_stacks(board_id)
-        except NextcloudDeckError:
-            return None
-        for stack in stacks if isinstance(stacks, list) else []:
-            title = str(stack.get("title") or "").strip().casefold()
-            if title == status_key.strip().casefold():
-                return str(stack.get("id") or "").strip() or None
-        return None
+        """Löst einen Status-Schlüssel zu einer Stack-ID auf (→ execution.py)."""
+        return await resolve_target_stack_id(self, board_id, status_key)
 
     async def send_message(
         self,
@@ -1491,115 +1192,60 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     @asynccontextmanager
     async def _active_turn(self, card_id: str):
-        """WIP-Tracking: registriert den Turn dieser Karte als in-flight und
-        entfernt ihn beim Verlassen des Blocks — auch bei Exception (kein Leak).
+        """WIP-Tracking: registriert den Turn dieser Karte als in-flight (→ wip.py).
 
-        UNABHÄNGIG vom Speed-Feature: send_typing() early-returnt bei
-        speed_enabled=False und hätte _active_turns nie gefüllt; dadurch war das
-        WIP-Limit (max_in_progress) unter der Default-Konfiguration faktisch
-        wirkungslos (FUNC-002). Der Turn-Lifecycle (add/discard) gehört an die
-        Stelle, wo der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
+        UNABHÄNGIG vom Speed-Feature (FUNC-002): der Turn-Lifecycle (add/discard)
+        gehört an die Stelle, wo der Turn tatsächlich startet/endet — auch bei
+        Exception (kein Leak).
         """
-        self._active_turns.add(card_id)
-        try:
+        async with active_turn(self, card_id):
             yield
-        finally:
-            self._active_turns.discard(card_id)
 
     async def _count_active_cards(self, exclude_card_id: Optional[str] = None) -> int:
-        """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
+        """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight) (→ wip.py).
 
-        Wird für das GLOBALE WIP-Limit genutzt. Nur Karten, deren Turn gerade
-        aktiv läuft (``_active_turns``), zählen gegen das Limit. Karten, die nur
-        in einer aktiven Spalte (todo/ready/running) liegen, aber KEINEN Turn
-        laufen, zählen NICHT — sonst blockiert eine fertige Karte in Ready das
-        WIP-Limit, obwohl sie gar nicht arbeitet (siehe Karte 123 blockiert
-        Karte 120 nach einem Restart, wenn der Fingerprint-Cache leer ist).
+        Zähl-Basis des GLOBALEN WIP-Limits: nur laufende Turns zählen, NICHT
+        die Spaltenlage — unabhängig vom Speed-Feature (FUNC-002), sonst
+        blockiert eine fertige Karte in Ready das Limit (Restart-Fälle, wenn
+        der Fingerprint-Cache leer ist).
 
         ``exclude_card_id`` blendet die aktuell betrachtete Karte aus, damit
         deren eigener Status nicht die Zählung verfälscht.
         """
-        if not self.runtime.max_in_progress:
-            return 0
-        total = 0
-        # In-Flight-Turns: Karten, deren Turn gerade aktiv läuft (add in
-        # _process_card vor dem Agent-Run, discard im finally). Das ist die
-        # einzige zuverlässige Zählung — Karten in aktiven Spalten ohne
-        # laufenden Turn dürfen das Limit nicht blockieren. Unabhängig vom
-        # Speed-Feature (FUNC-002): send_typing allein füllt _active_turns
-        # nur, wenn speed_enabled=True.
-        for cid in self._active_turns:
-            if exclude_card_id and cid == exclude_card_id:
-                continue
-            total += 1
-        return total
+        return await count_active_cards(self, exclude_card_id)
 
     def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
-        assigned = set(self.identity.assigned_uids(card))
-        if self.runtime.hermes_user_id in assigned:
-            return True
+        """Erkennt, ob eine Karte den Bot triggert (→ wip.py).
 
-        needles = {
-            self.runtime.hermes_user_id.lower(),
-            self.runtime.username.lower(),
-            *self.runtime.bot_aliases,
-        }
-        description = str(card.get("description") or "").lower()
-        if any(needle and needle in description for needle in needles):
-            return True
-
-        for comment in comments:
-            message = str(comment.get("message") or "").lower()
-            if any(needle and needle in message for needle in needles):
-                return True
-        return False
+        Zuweisung an den Hermes-User, @-Nennung in Beschreibung oder Kommentar
+        bzw. Bot-Aliases.
+        """
+        return card_is_triggered(self, card, comments)
 
     @staticmethod
     def _card_label_titles(card: Dict[str, Any]) -> List[str]:
-        """Alle Label-Titel einer Karte (sortiert deterministisch)."""
-        titles = [
-            str(lbl.get("title") or "")
-            for lbl in (card.get("labels") or [])
-            if isinstance(lbl, dict) and lbl.get("title")
-        ]
-        return sorted(titles)
+        """Alle Label-Titel einer Karte (sortiert deterministisch) (→ ingestion.py)."""
+        return card_label_titles(card)
 
     @staticmethod
     def _last_comment_author(comment: Dict[str, Any]) -> Optional[str]:
-        for key in ("actorId", "actor", "author", "userId"):
-            value = comment.get(key)
-            if isinstance(value, dict):
-                value = value.get("uid") or value.get("id") or value.get("primaryKey")
-            if value:
-                return str(value).strip()
-        return None
+        """Löst den Absender eines Kommentars robust aus (→ ingestion.py)."""
+        return last_comment_author(comment)
 
     def _comment_id(self, comment: Dict[str, Any]) -> Optional[int]:
-        try:
-            return int(str(comment.get("id") or ""))
-        except (ValueError, TypeError):
-            return None
+        """Kommentar-ID als int, oder None wenn nicht zahlbar (→ ingestion.py)."""
+        return comment_id(comment)
 
     def _new_comments_since_baseline(
         self, board_id: str, card_id: str, comments: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Liefert Kommentare mit ID > letzter verarbeiteter ID (aufsteigend).
+        """Liefert Kommentare mit ID > letzter verarbeiteter ID (→ ingestion.py).
 
         Während eine Karte auf Waiting/Freigabe wartet, sammeln sich mehrere
-        menschliche Kommentare an. Diese sollen dem Agenten beim nächsten Lauf
-        ALLE als Kontext übergeben werden — nicht nur der allerletzte. Eigene
-        (Agent-)Kommentare zwischen den menschlichen werden ausgefiltert.
+        menschliche Kommentare an — der Agent bekommt beim nächsten Lauf ALLE
+        als Kontext, nicht nur den allerletzten.
         """
-        baseline = self.state.last_processed_comment_id(board_id, card_id)
-        result: List[Dict[str, Any]] = []
-        for c in comments:
-            cid = self._comment_id(c)
-            if cid is None:
-                continue
-            if baseline is not None and cid <= baseline:
-                continue
-            result.append(c)
-        return result
+        return new_comments_since_baseline(self, board_id, card_id, comments)
 
     async def _process_card(
         self,
@@ -2078,152 +1724,62 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
 
     @classmethod
     def _run_has_failure_signal(cls, result: Any) -> bool:
-        """Erkennt Fehlschlag-Signale im Run-Ergebnis.
+        """Erkennt Fehlschlag-Signale im Run-Ergebnis (→ execution.py).
 
-        Prüft den Text des Ergebnisses auf bekannte Token-Limit-/Fehler-Marker
-        (z. B. „No visible answer was produced ... output-token limit"). Gibt
-        True zurück, wenn der Run offensichtlich ohne verwertbare Antwort
-        gescheitert ist.
+        Prüft den Text auf bekannte Token-Limit-/Fehler-Marker (z. B. „No
+        visible answer was produced ... output-token limit"); True, wenn der
+        Run offensichtlich ohne verwertbare Antwort gescheitert ist.
         """
-        text = ""
-        if isinstance(result, str):
-            text = result
-        elif isinstance(result, dict):
-            text = str(result.get("text") or result.get("content") or result.get("error") or "")
-        else:
-            text = str(result or "")
-        if not text:
-            return False
-        low = text.lower()
-        return any(m in low for m in cls._RUN_FAILURE_MARKERS)
+        return run_has_failure_signal(cls, result)
 
     @classmethod
     def _run_has_review_intent(cls, result: Any) -> bool:
-        """Erkennt ein Review-Intent-Signal des Agenten (Fix 1).
+        """Erkennt ein Review-Intent-Signal des Agenten (Fix 1) (→ execution.py).
 
-        Prüft auf semantische Muster „ich pausiere und warte auf eine menschliche
-        Entscheidung/Freigabe". Wird genutzt, um eine Karte ohne strukturelle
-        Änderung deterministisch nach 'review' zu verschieben statt sie in
-        'running' hängen zu lassen.
+        Semantische Muster „ich pausiere und warte auf eine menschliche
+        Entscheidung/Freigabe" → Karte ohne strukturelle Änderung
+        deterministisch nach 'review' statt in 'running' hängen zu lassen.
         """
-        text = ""
-        if isinstance(result, str):
-            text = result
-        elif isinstance(result, dict):
-            text = str(result.get("text") or result.get("content") or result.get("error") or "")
-        else:
-            text = str(result or "")
-        if not text:
-            return False
-        low = text.lower()
-        return any(m in low for m in cls._REVIEW_INTENT_MARKERS)
+        return run_has_review_intent(cls, result)
 
     @classmethod
     def _run_has_block_intent(cls, result: Any) -> bool:
-        """Erkennt ein inhaltliches Block-Intent-Signal des Agenten (Konzept 1).
+        """Erkennt ein Block-Intent-Signal des Agenten (Konzept 1) (→ execution.py).
 
         Anders als ``_run_has_failure_signal`` (technischer Token-/Fehler-Marker)
-        prüft dies auf ein semantisches „ich kann das nicht lösen / Plan-Change
-        nötig"-Signal. Rückgabe True = der Adapter soll die Karte nach 'blocked'
-        verschieben, sofern der Agent es nicht bereits selbst getan hat.
+        ein semantisches „ich kann das nicht lösen / Plan-Change nötig"-Signal.
+        True = Adapter soll die Karte nach 'blocked' verschieben, sofern der
+        Agent es nicht bereits selbst getan hat.
         """
-        text = ""
-        if isinstance(result, str):
-            text = result
-        elif isinstance(result, dict):
-            text = str(result.get("text") or result.get("content") or result.get("error") or "")
-        else:
-            text = str(result or "")
-        if not text:
-            return False
-        low = text.lower()
-        return any(m in low for m in cls._BLOCK_INTENT_MARKERS)
+        return run_has_block_intent(cls, result)
 
     async def _auto_block_card(self, card_id: str) -> None:
-        """Verschiebt eine fehlgeschlagene Karte nach 'blocked' + Kommentar.
+        """Verschiebt eine fehlgeschlagene Karte nach 'blocked' + Kommentar (→ execution.py).
 
         Wird vom Adapter (nicht vom Agenten) ausgelöst, wenn ein Run ohne
         verwertbare strukturelle Änderung endete oder eine Exception warf. Gibt
         den WIP-Platz frei, sodass die nächste wartende Karte starten kann.
         Best-effort: Fehler beim Move/Kommentar werden geloggt, niemals geworfen.
         """
-        try:
-            moved, err = await self._move_card_to_status(card_id, STATUS_BLOCKED)
-            if moved:
-                logger.info("Deck: Karte %s automatisch nach 'blocked' verschoben (Run-Fehler).", card_id)
-            else:
-                logger.warning("Deck: Auto-Block für Karte %s fehlgeschlagen: %s", card_id, err)
-        except Exception as exc:
-            logger.warning("Deck: Auto-Block für Karte %s schlug fehl: %s", card_id, exc)
-        try:
-            await self.client.add_comment(
-                card_id,
-                "🤖 AUTO-BLOCKED: Der Agent-Run konnte keine verwertbare Antwort erzeugen "
-                "(Token-Limit oder interner Fehler). Bitte prüfen und ggf. Reasoning anpassen.",
-            )
-        except Exception as exc:
-            logger.warning("Deck: Auto-Block-Kommentar für Karte %s fehlgeschlagen: %s", card_id, exc)
+        await auto_block_card(self, card_id)
 
     async def _rebaseline_card(self, board_id: str, stack_id: str, card_id: str) -> None:
-        """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu.
+        """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu (→ ingestion.py).
 
         WICHTIG: ``stack_id`` kann nach einem Move der AEHRE Stack sein (z. B.
-        die Karte wurde gerade von Triage nach Review verschoben). Deshalb wird
-        die aktuelle Position zuerst per _locate_card neu ermittelt — sonst
-        liefert get_card mit dem alten Stack None, die Baseline wird NICHT
-        gesetzt, und die Karte erscheint beim nächsten Poll als "verändert"
-        (Re-Trigger-Schleife nach einem Review-Move).
+        die Karte wurde gerade von Triage nach Review verschoben) — die
+        aktuelle Position wird deshalb per _locate_card neu ermittelt, sonst
+        entsteht eine Re-Trigger-Schleife nach einem Review-Move.
         """
-        # Aktuelle Position (board_id + stack_id) neu auflösen, falls vorhanden.
-        location = await self._locate_card(card_id)
-        if location is not None:
-            board_id, stack_id = location
-        try:
-            current = await self.client.get_card(board_id, stack_id, card_id)
-        except Exception:
-            return
-        if not current:
-            return
-        comments = await self.client.get_card_comments(card_id)
-        comments = sorted(
-            comments,
-            key=lambda c: int(str(c.get("id") or 0) or 0) if str(c.get("id") or 0).isdigit() else 0,
-        )
-        last = comments[-1] if comments else {}
-        fresh = DeckCardSnapshot(
-            board_id=board_id,
-            stack_id=stack_id,
-            card_id=card_id,
-            title=str(current.get("title") or ""),
-            description=str(current.get("description") or ""),
-            assigned_users=self.identity.assigned_uids(current),
-            labels=self._card_label_titles(current),
-            last_comment_id=str(last.get("id")) if last.get("id") else None,
-            last_author=self._last_comment_author(last) if last else None,
-            last_comment_message=str(last.get("message") or "") if last else None,
-            due_date=str(current.get("duedate")) if current.get("duedate") else None,
-            done=current.get("done"),
-        )
-        self.state.mark_processed(fresh)
+        await rebaseline_card(self, board_id, stack_id, card_id)
 
     async def poll_once(self) -> int:
-        boards = await self.client.get_boards()
-        processed = 0
-        for board in boards:
-            board_id = str(board.get("id") or "").strip()
-            if not board_id:
-                continue
-            config = self._configured_board(board_id)
-            if config is None:
-                continue
-            stacks = await self.client.get_stacks(board_id)
-            # Vorlagen-/Format-Sicherung im Backlog (pro Board, pro Poll-Zyklus)
-            await self._ensure_backlog_template(board_id, board, stacks)
-            for stack in stacks:
-                for card in stack.get("cards") or []:
-                    await self._process_card(board, stack, card)
-                    processed += 1
-        return processed
+        """Ein Poll-Zyklus über alle konfigurierten Boards (→ ingestion.py).
+
+        Pro Board: Backlog-Template sichern, dann jede Karte durch
+        ``_process_card`` jagen. Rückgabe: Anzahl verarbeiteter Karten.
+        """
+        return await poll_once(self)
 
     async def _ensure_backlog_template(
         self,
@@ -2231,151 +1787,25 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         board: Dict[str, Any],
         stacks: List[Dict[str, Any]],
     ) -> None:
-        """Sichert die Referenz-Vorlagenkarte im Backlog und prüft Backlog-Format.
+        """Sichert die Referenz-Vorlagenkarte im Backlog und prüft Backlog-Format (→ formatting.py).
 
-        Zwei Aufgaben (deterministisch, kein LLM beteiligt):
-
-        1. **Vorlagenkarte sicherstellen:** Existiert im Backlog keine Karte
-           mit dem Titel ``TEMPLATE_CARD_TITLE``, wird eine mit der
-           Template-Description angelegt. Der Mensch kann sie duplizieren —
-           dupliziert er sie (Titel geändert), legt der nächste Poll wieder
-           eine frische Vorlage an, da die alte "verbraucht" wurde.
-
-        2. **Format-Prüfung aller Backlog-Karten:** Karten im Backlog, deren
-           Description NICHT dem Task-Contract entspricht, bekommen das
-           Template-Skelett — so ist sichergestellt, dass jede Backlog-Karte
-           im richtigen Format liegt, bevor sie in den Workflow gezogen wird.
+        Zwei Aufgaben (deterministisch, kein LLM beteiligt): Vorlagenkarte
+        sicherstellen (dupliziert ein Mensch sie, legt der nächste Poll wieder
+        eine frische an) und fehlende Task-Contract-Abschnitte bei Backlog-
+        Karten ergänzen — aktiv bearbeitete Karten (Quiet-Window) bleiben
+        unangetastet, vorhandener Text wird bewahrt.
         """
-        try:
-            backlog_stacks = [
-                s for s in stacks
-                if is_backlog_stack(s, self._configured_board(board_id))
-            ]
-            if not backlog_stacks:
-                return
-
-            backlog_stack = backlog_stacks[0]
-            backlog_stack_id = str(backlog_stack.get("id") or "").strip()
-            cards = backlog_stack.get("cards") or []
-
-            # 1. Vorlagenkarte prüfen/anlegen
-            template_exists = any(
-                str(c.get("title") or "").strip().lower() == TEMPLATE_CARD_TITLE.lower()
-                for c in cards
-            )
-            if not template_exists:
-                try:
-                    created = await self.client.create_card(
-                        board_id,
-                        backlog_stack_id,
-                        title=TEMPLATE_CARD_TITLE,
-                        description=template_description(self.runtime.template_language),
-                        order=0,
-                    )
-                    if created and created.get("id"):
-                        logger.info(
-                            "Deck: Vorlagenkarte '%s' im Backlog von Board %s angelegt.",
-                            TEMPLATE_CARD_TITLE, board_id,
-                        )
-                    else:
-                        logger.warning("Deck: Vorlagenkarte konnte nicht angelegt werden (Board %s).", board_id)
-                except NextcloudDeckError as exc:
-                    logger.warning("Deck: Vorlagenkarte anlegen fehlgeschlagen (Board %s): %s", board_id, exc)
-
-            # 2. Format-Prüfung aller Backlog-Karten (außer der Vorlage selbst)
-            now = time.time()
-            quiet = self.runtime.backlog_format_quiet_seconds
-            for card in cards:
-                title = str(card.get("title") or "").strip()
-                if title.lower() == TEMPLATE_CARD_TITLE.lower():
-                    continue
-                description = str(card.get("description") or "")
-
-                # Aktiv bearbeitete Karten NICHT anfassen (nur wenn die
-                # Ruhe-Schwelle > 0 ist): wurde die Karte erst kürzlich
-                # geändert, wird von einer laufenden menschlichen Bearbeitung
-                # ausgegangen. quiet_seconds == 0 deaktiviert diese Prüfung.
-                if quiet > 0:
-                    last_modified = card.get("lastModified")
-                    if isinstance(last_modified, (int, float)) and last_modified > 0:
-                        age_seconds = now - last_modified
-                        if age_seconds < quiet:
-                            logger.debug(
-                                "Deck: Backlog-Karte %s ('%s') wurde vor %.0fs geändert — Format-Korrektur übersprungen (aktiv bearbeitet).",
-                                card.get("id"), title, age_seconds,
-                            )
-                            continue
-
-                # Nur FEHLENDE Kernabschnitte ermitteln — der vorhandene,
-                # menschengeschriebene Text bleibt unangetastet.
-                missing = missing_template_sections(description)
-
-                # Zusätzlich: eine völlig leere Description bekommt das komplette
-                # Skelett (hier gibt es nichts zu bewahren); sonst nur ergänzen.
-                if not missing and not description.strip():
-                    missing = [template_description(self.runtime.template_language).strip()]
-
-                if not missing:
-                    continue
-
-                card_id = str(card.get("id") or "").strip()
-                if not card_id:
-                    continue
-
-                # Fehlende Abschnitte UNTEN anhängen (Präfix entfernt Platzhalter).
-                suffix = "\n\n".join(missing)
-                new_description = description.strip()
-                if new_description:
-                    new_description = f"{new_description}\n\n{suffix}"
-                else:
-                    new_description = suffix
-
-                try:
-                    await self.client.update_card(
-                        board_id, backlog_stack_id, card_id, description=new_description
-                    )
-                    logger.info(
-                        "Deck: Backlog-Karte %s ('%s') — fehlende Abschnitte ergänzt: %s",
-                        card_id,
-                        title,
-                        ", ".join(
-                            m.splitlines()[0].lstrip("#").strip() if m.splitlines() else m
-                            for m in missing
-                        ),
-                    )
-                except NextcloudDeckError as exc:
-                    logger.warning("Deck: Format-Fix für Karte %s fehlgeschlagen: %s", card_id, exc)
-        except Exception as exc:
-            logger.warning("Deck: Backlog-Template-Sicherung fehlgeschlagen (Board %s): %s", board_id, exc)
+        await ensure_backlog_template(self, board_id, board, stacks)
 
     async def _polling_loop(self) -> None:
-        # Zähler für Health-Log (Fix 3): macht einen stillen Loop-Tod sichtbar.
-        poll_count = 0
-        while not self._stop_event.is_set():
-            try:
-                await self.poll_once()
-                poll_count += 1
-                # Health-Log alle 20 Zyklen (~10 min bei 30s-Intervall), damit
-                # ein lebender Loop beobachtbar bleibt.
-                if poll_count % 20 == 0:
-                    logger.info("Deck: Polling-Loop aktiv (%d Zyklen).", poll_count)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Nextcloud Deck polling failed")
-                # Fix 2: Session nach Fehler zurücksetzen, damit ein einzelner
-                # Timeout/Connection-Error nicht den Loop dauerhaft lähmt.
-                try:
-                    await self.client.reset_session()
-                except Exception:
-                    pass
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.runtime.poll_interval_seconds,
-                )
-            except asyncio.TimeoutError:
-                pass
+        """Dauerhafter Polling-Loop (→ ingestion.py).
+
+        ``poll_once`` im ``poll_interval_seconds``-Rhythmus; Health-Log alle
+        20 Zyklen (Fix 3, stiller Loop-Tod sichtbar bleibt); Session nach
+        Fehler zurücksetzen (Fix 2, ein Timeout/Connection-Error lähmt den
+        Loop nicht dauerhaft).
+        """
+        await polling_loop(self)
 
     # ── User-Status-Contract (wie Talk-Plugin) ─────────────────────────
     # Der Hermes-Gateway ruft diese Methoden während eines Turns auf, sofern
@@ -2495,146 +1925,51 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 self._active_turns.discard(card_id)
 
     async def _run_speed_heartbeat(self, chat_id: str, stop_event: asyncio.Event) -> None:
-        """Eigener Speed-Heartbeat: setzt den Live-Status während eines Turns.
+        """Eigener Speed-Heartbeat während eines Turns (→ formatting.py).
 
-        Das Gateway ruft ``send_typing`` nur auf, wenn es Progress-Messages gibt
-        (Deck sendet keine, weil es kein Typing-Konzept hat). Deshalb starten wir
-        hier einen eigenen Heartbeat, der ``send_typing`` alle paar Sekunden
-        aufruft, solange der Turn läuft (``stop_event`` nicht gesetzt).
+        Das Gateway ruft ``send_typing`` nur auf, wenn es Progress-Messages
+        gibt (Deck sendet keine) — dieser Heartbeat ruft ``send_typing``
+        deshalb alle paar Sekunden selbst auf, solange ``stop_event`` nicht
+        gesetzt ist.
         """
-        if not self.runtime.speed_enabled:
-            return
-        try:
-            while not stop_event.is_set():
-                try:
-                    await self.send_typing(chat_id)
-                except Exception as exc:
-                    logger.debug("Deck: Speed-Heartbeat fehlgeschlagen: %s", exc)
-                # Kurz warten, dann erneut prüfen (kein fester Sleep, damit der
-                # Stop schnell greift).
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    pass
-        except asyncio.CancelledError:
-            pass
-        finally:
-            # Turn-Ende: Status aufräumen (online + Custom-Status löschen).
-            try:
-                await self.presence_mgr.clear_custom_status_message(force=True)
-                await self.presence_mgr.set_presence_status("online")
-            except Exception as exc:
-                logger.debug("Deck: Speed-Heartbeat-Cleanup fehlgeschlagen: %s", exc)
-            card_id = self._card_id_from_target(str(chat_id or ""))
-            if card_id:
-                self._active_turns.discard(card_id)
+        await run_speed_heartbeat(self, chat_id, stop_event)
 
     async def _fetch_speed(self) -> Optional[Dict[str, Any]]:
-        """Liest die Live-Geschwindigkeit vom Ollama-Sidecar (über NPM-/speed).
+        """Liest die Live-Geschwindigkeit vom Ollama-Sidecar (→ formatting.py).
 
         Kurzer Timeout + best-effort: ein toter Sidecar darf nie den Turn
         verlangsamen. Ergebnis wird kurz gecacht, damit die häufigen
         Typing-Heartbeats den Sidecar nicht fluten.
         """
-        if not self.runtime.speed_url:
-            return None
-        try:
-            if self._speed_session is None or self._speed_session.closed:
-                self._speed_session = aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=0.4)
-                )
-            async with self._speed_session.get(
-                self.runtime.speed_url, timeout=aiohttp.ClientTimeout(total=0.4)
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json(content_type=None)
-                self._last_speed = data if isinstance(data, dict) else None
-                return self._last_speed
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-            return None
+        return await fetch_speed(self)
 
     @staticmethod
     def _speed_suffix(speed: Dict[str, Any]) -> str:
-        """Formatiert den Sidecar-JSON in einen kompakten Geschwindigkeits-Text.
+        """Sidecar-JSON → kompakten Geschwindigkeits-Text (→ formatting.py).
 
-        Generate-Phase zeigt die Generation-Geschwindigkeit (``tg``, ~10-20 t/s),
-        Prompt-Phase zeigt BOTH den Kontext-Fortschritt UND die Prompt-Geschwindigkeit
-        (``prompt_tps``, ~100 t/s) — so ist die schnelle Token-Verarbeitung beim
-        Kontext-Einlesen sichtbar.
+        Generate-Phase zeigt die Generation-Geschwindigkeit (``tg``),
+        Prompt-Phase zeigt den Kontext-Fortschritt UND die Prompt-
+        Geschwindigkeit (``prompt_tps``).
         """
-        phase = str(speed.get("phase", "idle"))
-        if phase == "generate":
-            tg = speed.get("tg")
-            if isinstance(tg, (int, float)) and tg > 0:
-                return f"{tg:.1f} t/s"
-            return ""
-        if phase == "prompt":
-            progress = speed.get("prompt_progress")
-            prompt_tps = speed.get("prompt_tps")
-            parts: List[str] = []
-            if isinstance(progress, (int, float)) and progress > 0:
-                pct = int(progress * 100)
-                parts.append(f"Kontext {pct}%")
-            if isinstance(prompt_tps, (int, float)) and prompt_tps > 0:
-                parts.append(f"⏱ {prompt_tps:.0f} t/s")
-            return " · ".join(parts)
-        return ""
+        return speed_suffix(speed)
 
     async def _card_status_label(self, chat_id: str) -> str:
-        """Liefert ein kompaktes Karten-Label ('Karte 116 · Titel') für den Status.
+        """Liefert ein kompaktes Karten-Label ('Karte 116 · Titel') für den Status (→ formatting.py).
 
         Der Titel wird pro Karte einmalig (best-effort) aufgelöst und gecacht,
         damit die häufigen Status-Updates keinen API-Spam erzeugen. Fällt die
         Auflösung aus, bleibt nur die Karten-Nummer.
         """
-        card_id = self._card_id_from_target(str(chat_id or ""))
-        if not card_id or card_id == str(chat_id or ""):
-            return ""
-        cache = getattr(self, "_status_card_title_cache", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_status_card_title_cache", cache)
-        title = cache.get(card_id)
-        if title is None:
-            title = ""
-            try:
-                board_id, stack_id = await self._locate_card(card_id)
-                card = await self.client.get_card(board_id, stack_id, card_id)
-                if card and card.get("title"):
-                    title = str(card["title"]).strip()
-            except Exception:
-                title = ""
-            # Leeren Titel als '' cachen (nicht erneut versuchen) — aber ein
-            # Lookup-Fehler (exception) soll beim nächsten Mal neu versuchen.
-            cache[card_id] = title
-        label = f"Karte {card_id}"
-        if title:
-            short = title if len(title) <= 26 else title[:25].rstrip() + "…"
-            label = f"Karte {card_id} · {short}"
-        return label
+        return await card_status_label(self, chat_id)
 
     @staticmethod
     def _map_progress_status(status_key: str, content: str) -> tuple[Optional[str], Optional[str]]:
-        """Übersetzt Gateway-Status-Signal in (Text, Emoji) für den User-Status.
+        """Übersetzt Gateway-Status-Signal in (Text, Emoji) für den User-Status (→ formatting.py).
 
         Gleiche Semantik wie das Talk-Plugin: context laden, thinking,
         generating, tool-Ausführung.
         """
-        normalized_key = str(status_key or "").strip().lower()
-        normalized_content = " ".join(str(content or "").split()).strip()
-        normalized_lower = normalized_content.lower()
-        if "context" in normalized_lower:
-            return "Liest Kontext", "📖"
-        if normalized_key == "_thinking" or normalized_lower.startswith("💬 "):
-            return "Denkt nach", "🤔"
-        if normalized_key in ("_generating", "_responding", "llm.generating"):
-            return "Antwortet", "✍️"
-        if normalized_key.startswith("tool.") or "tool" in normalized_key:
-            return "Fuehrt Werkzeuge aus", "🛠️"
-        if normalized_content:
-            return (normalized_content[:80], "💬")
-        return None, None
+        return map_progress_status(status_key, content)
 
 
 def validate_deck_config(config: PlatformConfig) -> bool:

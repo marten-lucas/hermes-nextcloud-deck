@@ -23,7 +23,11 @@ The integration is deliberately small and safe:
 ```text
 .
 ├── __init__.py             # Plugin entrypoint (exports register)
-├── adapter.py              # Core platform adapter: polling, triggers, send()
+├── adapter.py              # Core platform adapter: Lifecycle, send()-Contract, schlanke Delegatoren
+├── wip.py                  # WIP-Limit: In-Flight-Turn-Tracking + Trigger-Erkennung (unabhängig vom Speed-Feature)
+├── ingestion.py            # Polling, Dedupe/Rebaseline, Trigger-Basis (Board-/Card-Iteration)
+├── formatting.py           # Template-Scaffold, Quiet-Window, Speed-Heartbeat, Status-Mapping
+├── execution.py            # deck_card_action-Handler: Card-Mutationen, Gate-Logik, Intent-Erkennung
 ├── client.py               # Nextcloud Deck REST client (Cards, Stacks, Labels, Assignees, OCS)
 ├── workflow.py             # Workflow, Phasen, Gates & Subtask-Logik (Konzept v5)
 ├── identity.py             # DeckIdentityResolver: actor resolution, group lookup, ContextVars
@@ -52,7 +56,8 @@ The integration is deliberately small and safe:
     ├── test_platform_key.py
     ├── test_skill_whitelist.py
     ├── test_state_path.py
-    └── test_wip_limit.py
+    ├── test_wip_limit.py
+    └── test_modularization.py
 ```
 
 ## Installation
