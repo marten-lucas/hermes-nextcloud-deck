@@ -17,11 +17,11 @@ for _mod in (
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODULE_NAMES = ("wip", "ingestion", "formatting", "execution")
 
-from adapter import NextcloudDeckPlatform
-import wip
-import ingestion
-import formatting
 import execution
+import formatting
+import ingestion
+import wip
+from adapter import NextcloudDeckPlatform
 
 
 def _make_adapter() -> NextcloudDeckPlatform:

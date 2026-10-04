@@ -1,7 +1,12 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+from adapter import (
+    DECK_CARD_ACTION_SCHEMA,
+    NextcloudDeckPlatform,
+    _make_deck_card_action_handler,
+)
 from workflow import (
     APPROVAL_APPROVED,
     APPROVAL_REQUIRED,
@@ -12,6 +17,7 @@ from workflow import (
     STATUS_REVIEW,
     STATUS_RUNNING,
     DeckWorkflowContext,
+    analyze_board_suitability,
     build_capabilities_prompt,
     check_agent_label_gate,
     check_agent_status_gate,
@@ -21,13 +27,7 @@ from workflow import (
     is_backlog_stack,
     is_destructive_tool,
     parse_subtasks,
-    analyze_board_suitability,
     resolve_stack_id_for_status,
-)
-from adapter import (
-    NextcloudDeckPlatform,
-    DECK_CARD_ACTION_SCHEMA,
-    _make_deck_card_action_handler,
 )
 
 
@@ -139,6 +139,7 @@ class TestSetupTestCard(unittest.IsolatedAsyncioTestCase):
         self.adapter.client.get_stacks = AsyncMock(return_value=[
             {"id": "39", "title": "Todo"},
         ])
+        self.adapter.client.create_card = AsyncMock(return_value={"id": "123"})
         card_id = await self.adapter.setup_test_card(
             board_id="7",
             title="Test",
@@ -223,7 +224,7 @@ class TestWorkflowLogic(unittest.TestCase):
         for variant in ["hermes/approval:approved", "approval:approved", "✔️ Freigabe erteilt"]:
             allowed, reason = check_agent_label_gate(variant, "plan")
             self.assertFalse(allowed, variant)
-            self.assertIn("Gate 1", reason)
+            self.assertIn("Gate 1", reason or "")
 
     def test_configure_friendly_labels_from_config(self):
         """Label-Mapping wird dynamisch aus der Config geladen und angewendet."""
@@ -305,7 +306,7 @@ class TestWorkflowLogic(unittest.TestCase):
         human, agent = split_agent_workspace(desc)
         self.assertTrue(human.rstrip().endswith("# Agent Workspace"))
         self.assertIn("# Objective", human)
-        self.assertEqual(agent.strip(), "## Subtasks\n- [ ] x")
+        self.assertEqual((agent or "").strip(), "## Subtasks\n- [ ] x")
 
         # Ohne Marker: agent_part = None
         human2, agent2 = split_agent_workspace("# Objective\nZiel")
@@ -324,7 +325,7 @@ class TestWorkflowLogic(unittest.TestCase):
         # Anker-Form: "#" und Titel sind durch den Anker-Link getrennt, daher nur
         # den Titel prüfen (konsistent zu L323 "Agent Workspace" ohne "#").
         self.assertIn("Objective", human3)
-        self.assertEqual(agent3.strip(), "## Subtasks\n- [ ] x")
+        self.assertEqual((agent3 or "").strip(), "## Subtasks\n- [ ] x")
         # Kein Duplikat: der Marker soll EINMAL vorkommen, nicht angehängt werden.
         self.assertEqual(human3.lower().count("agent workspace"), 1)
 
@@ -371,7 +372,7 @@ class TestWorkflowLogic(unittest.TestCase):
     def test_status_gate_done_blocked(self):
         allowed, reason = check_agent_status_gate(STATUS_DONE, PHASE_EXECUTE, APPROVAL_APPROVED)
         self.assertFalse(allowed)
-        self.assertIn("Gate 2", reason)
+        self.assertIn("Gate 2", reason or "")
 
         allowed, reason = check_agent_status_gate("erledigt", PHASE_EXECUTE)
         self.assertFalse(allowed)
@@ -387,7 +388,7 @@ class TestWorkflowLogic(unittest.TestCase):
             STATUS_RUNNING, PHASE_PLAN, APPROVAL_REQUIRED, task_type="implementation"
         )
         self.assertFalse(allowed)
-        self.assertIn("Gate 1", reason)
+        self.assertIn("Gate 1", reason or "")
 
         # Mit approval erlaubt
         allowed, reason = check_agent_status_gate(
@@ -417,7 +418,7 @@ class TestWorkflowLogic(unittest.TestCase):
             STATUS_RUNNING, PHASE_PLAN, APPROVAL_REQUIRED, task_type="documentation", risk="high"
         )
         self.assertFalse(allowed)
-        self.assertIn("Gate 1", reason)
+        self.assertIn("Gate 1", reason or "")
 
     def test_gate1_is_mandatory(self):
         from workflow import gate1_is_mandatory
@@ -443,7 +444,7 @@ class TestWorkflowLogic(unittest.TestCase):
         ctx = DeckWorkflowContext(board_id="7", card_id="42", phase=PHASE_EXECUTE, risk="high")
         allowed, reason = check_destructive_gate("delete_user", ctx, patterns)
         self.assertFalse(allowed)
-        self.assertIn("Gate 3", reason)
+        self.assertIn("Gate 3", reason or "")
 
     def test_destructive_gate_allows_low_risk(self):
         patterns = compile_destructive_patterns()
@@ -508,7 +509,7 @@ class TestWorkflowLogic(unittest.TestCase):
     def test_label_gate_prevent_self_approval(self):
         allowed, reason = check_agent_label_gate("hermes/approval:approved", PHASE_PLAN)
         self.assertFalse(allowed)
-        self.assertIn("Gate 1", reason)
+        self.assertIn("Gate 1", reason or "")
 
         allowed, reason = check_agent_label_gate(
             "hermes/phase:execute", PHASE_PLAN, approval_status=None, task_type="implementation"
@@ -573,7 +574,7 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
             metadata={"target_status": "done"},
         )
         self.assertFalse(result.success)
-        self.assertIn("Gate 2", result.error)
+        self.assertIn("Gate 2", result.error or "")
         self.adapter.client.add_comment.assert_called_once()
         self.assertIn("Gate 2", self.adapter.client.add_comment.call_args[0][1])
 
@@ -607,7 +608,7 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
             metadata={"target_status": "review"},
         )
         self.assertFalse(result.success)
-        self.assertIn("silent API failure", result.error)
+        self.assertIn("silent API failure", result.error or "")
 
     async def test_send_auto_moves_to_review_on_description_without_target_status(self):
         """b-Fix: Beschreibung ohne target_status → deterministischer Auto-Move nach review."""

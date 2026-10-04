@@ -1,0 +1,24 @@
+# Ruff-Config für das Hermes-Nextcloud-Deck-Plugin.
+#
+# Bewusst ENGE, aber ZIELGENAUE Regelauswahl. Das Deck ist ein eingebettetes
+# Hermes-Plugin (entrypoint adapter.py) und setzt einige Stile BEWUSST ein,
+# daher werden die dazugehörigen Ruff-Regeln hier nicht aktiv:
+#   * UP (Py-Upgrade)  — durchgängig alte Typ-Schreibweise (Dict/List/Optional)
+#   * BLE (blind-except) — defensive, breite `except Exception`-Fallbacks für
+#                          optionale Integrationen (Gateway-Entdeckung, Sidecars)
+#   * E501 (Zeilenlänge) — kein hartes Limit im Deck (max. ~170 Zeichen)
+#   * E402 (Import-Position) — try/except-Importstruktur ist intentional
+#   * E731 (lambda-Zuweisung) — `Platform = lambda name: name` (Test-Fallback)
+#
+# Behalten: E/F/I = echte Fehler (Pycodestyle-Kern, Pyflakes: ungenutzte
+# Imports, undefinierte Namen; Isort: Import-Ordnung).
+target-version = "py311"
+line-length = 170
+
+[lint]
+select = ["E", "F", "I"]
+ignore = [
+    "E501",  # Zeilenlänge: kein hartes Limit im Deck
+    "E402",  # Module-Imports nach Code: try/except-Struktur ist intentional
+    "E731",  # lambda-Zuweisung: Test-Fallback `Platform = lambda name: name`
+]

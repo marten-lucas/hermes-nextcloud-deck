@@ -26,18 +26,18 @@ import aiohttp
 try:
     from .client import NextcloudDeckError
     from .workflow import (
+        TEMPLATE_CARD_TITLE,
         is_backlog_stack,
         missing_template_sections,
         template_description,
-        TEMPLATE_CARD_TITLE,
     )
 except ImportError:  # direct test/import
     from client import NextcloudDeckError
     from workflow import (
+        TEMPLATE_CARD_TITLE,
         is_backlog_stack,
         missing_template_sections,
         template_description,
-        TEMPLATE_CARD_TITLE,
     )
 
 logger = logging.getLogger(__name__)

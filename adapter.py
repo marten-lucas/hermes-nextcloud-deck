@@ -18,29 +18,28 @@ try:
     from .presence import DeckPresenceManager
     from .state import DeckCardSnapshot, DeckStateManager
     from .workflow import (
-        LABEL_PREFIX_PHASE,
-        PHASE_PLAN,
-        PHASE_EXECUTE,
         APPROVAL_APPROVED,
         APPROVAL_REQUIRED,
-        build_capabilities_prompt,
-        check_agent_status_gate,
-        configure_friendly_labels,
-        friendly_label_title,
-        has_workflow_label_change,
         DEFAULT_TEMPLATE_LANGUAGE,
-        TEMPLATE_LANGUAGES,
-        FRIENDLY_LABELS,
+        LABEL_PREFIX_PHASE,
+        PHASE_EXECUTE,
+        PHASE_PLAN,
         STATUS_REVIEW,
         STATUS_RUNNING,
-        compile_destructive_patterns,
-        current_deck_context,
-        current_deck_action_count,
-        check_destructive_gate,
+        TEMPLATE_LANGUAGES,
         DeckWorkflowContext,
         DestructiveToolBlocked,
         analyze_board_suitability,
+        build_capabilities_prompt,
+        check_agent_status_gate,
+        check_destructive_gate,
+        compile_destructive_patterns,
+        configure_friendly_labels,
+        current_deck_action_count,
+        current_deck_context,
         extract_hermes_labels,
+        friendly_label_title,
+        has_workflow_label_change,
         is_backlog_stack,
         is_terminal_stack,
         parse_subtasks,
@@ -52,29 +51,28 @@ except ImportError:  # direct test/import
     from presence import DeckPresenceManager
     from state import DeckCardSnapshot, DeckStateManager
     from workflow import (
-        LABEL_PREFIX_PHASE,
-        PHASE_PLAN,
-        PHASE_EXECUTE,
         APPROVAL_APPROVED,
         APPROVAL_REQUIRED,
-        build_capabilities_prompt,
-        check_agent_status_gate,
-        configure_friendly_labels,
-        friendly_label_title,
-        has_workflow_label_change,
         DEFAULT_TEMPLATE_LANGUAGE,
-        TEMPLATE_LANGUAGES,
-        FRIENDLY_LABELS,
+        LABEL_PREFIX_PHASE,
+        PHASE_EXECUTE,
+        PHASE_PLAN,
         STATUS_REVIEW,
         STATUS_RUNNING,
-        compile_destructive_patterns,
-        current_deck_context,
-        current_deck_action_count,
-        check_destructive_gate,
+        TEMPLATE_LANGUAGES,
         DeckWorkflowContext,
         DestructiveToolBlocked,
         analyze_board_suitability,
+        build_capabilities_prompt,
+        check_agent_status_gate,
+        check_destructive_gate,
+        compile_destructive_patterns,
+        configure_friendly_labels,
+        current_deck_action_count,
+        current_deck_context,
         extract_hermes_labels,
+        friendly_label_title,
+        has_workflow_label_change,
         is_backlog_stack,
         is_terminal_stack,
         parse_subtasks,
@@ -163,6 +161,9 @@ try:
     )
 except Exception:  # local test fallback
     Platform = lambda name: name  # type: ignore
+    # Typ-Placeholder (Runtime-Bindung) für den Gateway-freien Modus. NUR in
+    # Annotationen referenziert (via `from __future__ import annotations`),
+    # nie zur Laufzeit. `Any` bleibt für Test-Mocks (SimpleNamespace) kompatibel.
     PlatformConfig = Any  # type: ignore
 
     class MessageType:
@@ -388,7 +389,7 @@ def _session_store_keys(store: Any) -> Optional[List[str]]:
     return _keys_from(getattr(store, "_entries", None))
 
 
-def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
+def _build_runtime_config(config: Any) -> DeckRuntimeConfig:
     extra = getattr(config, "extra", {}) or {}
     base_url = str(
         extra.get("base_url")
@@ -554,7 +555,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     )
 
 
-class NextcloudDeckPlatform(BasePlatformAdapter):
+class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralTypeIssues]  # bedingte Definition (Gateway vs. Fallback)
     """Polling platform adapter for explicitly configured Nextcloud Deck boards."""
 
     @staticmethod
@@ -569,7 +570,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
             return Platform("deck")
         except ValueError:
             try:
-                from gateway.platform_registry import platform_registry
+                from gateway.platform_registry import platform_registry  # type: ignore
 
                 if platform_registry.is_registered("deck"):
                     return Platform("deck")
@@ -577,7 +578,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
                 pass
             return Platform("matrix")
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: Any):
         super().__init__(config, self._resolve_platform())
         global _LIVE_ADAPTER_REF
         _LIVE_ADAPTER_REF = self
@@ -1972,7 +1973,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         return map_progress_status(status_key, content)
 
 
-def validate_deck_config(config: PlatformConfig) -> bool:
+def validate_deck_config(config: Any) -> bool:
     runtime = _build_runtime_config(config)
     return bool(
         runtime.base_url
@@ -2030,7 +2031,7 @@ def check_is_connected(adapter_or_config: Any) -> bool:
     return validate_deck_config_from_env()
 
 
-def _build_adapter(config: PlatformConfig) -> NextcloudDeckPlatform:
+def _build_adapter(config: Any) -> NextcloudDeckPlatform:
     return NextcloudDeckPlatform(config)
 
 

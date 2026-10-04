@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 # Clear any cached gateway imports to ensure adapter uses its fallback classes
 if 'gateway' in sys.modules:
@@ -60,7 +61,7 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
 
     def test_state_manager_deduplication_and_change_detection(self):
         mgr = DeckStateManager()
-        base = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
+        base: dict[str, Any] = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
         # Neuer Zustand -> sollte verarbeitet werden; danach Baseline setzen
         self.assertTrue(mgr.should_process(DeckCardSnapshot(**base)))
         mgr.mark_processed(DeckCardSnapshot(**base))
@@ -72,7 +73,7 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
 
     def test_state_manager_label_change_is_new_event(self):
         mgr = DeckStateManager()
-        base = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
+        base: dict[str, Any] = dict(board_id="1", stack_id="10", card_id="100", title="Test", description="Desc")
         mgr.mark_processed(DeckCardSnapshot(**base))
         # Identischer Zustand -> kein Re-Trigger
         self.assertFalse(mgr.should_process(DeckCardSnapshot(**base)))
@@ -103,8 +104,9 @@ class TestNextcloudDeckPlatform(unittest.IsolatedAsyncioTestCase):
         os.environ["NEXTCLOUD_DECK_USERNAME"] = "hermes"
         os.environ["NEXTCLOUD_DECK_APP_PASSWORD"] = "secret"
         result = env_enablement()
-        self.assertIsInstance(result, dict)
-        self.assertEqual(result["base_url"], "https://cloud.example.org")
+        self.assertIsNotNone(result)
+        if result is not None:  # Pyright-Narrowing (Prüfung obige Assertion)
+            self.assertEqual(result["base_url"], "https://cloud.example.org")
 
     def test_runtime_requires_explicit_boards_for_ingestion(self):
         config = SimpleNamespace(

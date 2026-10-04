@@ -23,7 +23,7 @@ dünne Delegatoren bereit.
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 try:
     from .client import NextcloudDeckError
@@ -37,9 +37,9 @@ try:
         PHASE_PLAN,
         STATUS_BLOCKED,
         STATUS_REVIEW,
+        canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
-        canonical_label_key,
         extract_hermes_labels,
         friendly_label_title,
         split_agent_workspace,
@@ -56,9 +56,9 @@ except ImportError:  # direct test/import
         PHASE_PLAN,
         STATUS_BLOCKED,
         STATUS_REVIEW,
+        canonical_label_key,
         check_agent_label_gate,
         check_agent_status_gate,
-        canonical_label_key,
         extract_hermes_labels,
         friendly_label_title,
         split_agent_workspace,

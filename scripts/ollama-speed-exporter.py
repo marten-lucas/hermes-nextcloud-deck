@@ -22,6 +22,7 @@ import re
 import subprocess
 import threading
 import time
+from typing import Any
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 9090
@@ -59,8 +60,9 @@ def _snapshot() -> dict:
     """Liefert den aktuellen Zustand; überschrieben zu idle, wenn veraltet."""
     with _lock:
         state = dict(_state)
-    if state.get("phase") != "idle" and state.get("ts"):
-        age = time.time() - float(state.get("ts"))
+    ts = state.get("ts")
+    if state.get("phase") != "idle" and ts:
+        age = time.time() - float(ts)
         if age > STALE_AFTER_SECONDS:
             return {
                 "phase": "idle",
@@ -84,6 +86,9 @@ def _tail_journald() -> None:
         text=True,
     )
     try:
+        if proc.stdout is None:  # defensiv; durch stdout=PIPE garantiert
+            proc.terminate()
+            return
         for line in proc.stdout:
             m = _PROMPT.search(line)
             if m:
@@ -128,7 +133,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
 

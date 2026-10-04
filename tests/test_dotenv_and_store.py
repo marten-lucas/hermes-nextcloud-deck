@@ -107,13 +107,13 @@ class TestSessionStoreKeys(unittest.TestCase):
             def entries(self):
                 return {"p": 1, "q": 2}
 
-        self.assertEqual(sorted(adapter_mod._session_store_keys(_Store())), ["p", "q"])
+        self.assertEqual(sorted(adapter_mod._session_store_keys(_Store()) or []), ["p", "q"])
 
     def test_falls_back_to_private_entries(self):
         class _Store:
             _entries = {"x": 1, "y": 2}
 
-        self.assertEqual(sorted(adapter_mod._session_store_keys(_Store())), ["x", "y"])
+        self.assertEqual(sorted(adapter_mod._session_store_keys(_Store()) or []), ["x", "y"])
 
     def test_no_keys_returns_none(self):
         class _Store:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -17,13 +18,15 @@ def _get_xonbehalf():
     if _xonbehalf is not None:
         return _xonbehalf
     try:
-        import hermes_x_on_behalf
+        import hermes_x_on_behalf  # type: ignore[import-unresolved]  # optionales Paket (Fallback: Plugin-Verzeichnis)
 
         _xonbehalf = hermes_x_on_behalf
     except Exception:
         try:
             # Fallback: Plugin-Verzeichnis liegt als Schwesterprojekt im Workspace
-            import importlib.util, sys, types
+            import importlib.util
+            import sys
+            import types
 
             plugin_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -215,6 +218,10 @@ class DeckIdentityResolver:
     def principal_context(principal):
         """Context-Manager mit Token-basiertem Set/Reset (leak-proof)."""
         xob = _get_xonbehalf()
+        if xob is None:
+            # Paket nicht verfügbar: Block ohne Principal-Kontext ausführen
+            # (statt AttributeError) — entspricht dem else-Zweig des Adapters.
+            return contextlib.nullcontext()
         return xob.principal_context(principal)
 
     @staticmethod
