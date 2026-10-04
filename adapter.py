@@ -173,6 +173,11 @@ class DeckRuntimeConfig:
     template_language: str = DEFAULT_TEMPLATE_LANGUAGE
     speed_enabled: bool = False
     speed_url: str = ""
+    # Rohes label_mapping aus der Config (Data-only). ARCH-003: Wird in
+    # _build_runtime_config NUR gespeichert, NICHT angewendet. Die Anwendung
+    # (Mutation des modul-globalen FRIENDLY_LABELS) erfolgt ausschließlich im
+    # Adapter-Konstruktor, damit Validierungs-/Status-Pfade rein bleiben.
+    label_mapping: Optional[Dict[str, Any]] = None
 
 
 def _default_state_file() -> str:
@@ -373,10 +378,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     try:
         backlog_format_quiet_seconds = float(
             extra.get("backlog_format_quiet_seconds")
-            or _env(
-                "NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS",
-                "NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS",
-            )
+            or _env("NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS")
             or BACKLOG_FORMAT_QUIET_SECONDS
         )
     except (TypeError, ValueError):
@@ -391,7 +393,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     try:
         max_in_progress = int(
             extra.get("max_in_progress")
-            or _env("NEXTCLOUD_DECK_MAX_IN_PROGRESS", "NEXTCLOUD_DECK_MAX_IN_PROGRESS")
+            or _env("NEXTCLOUD_DECK_MAX_IN_PROGRESS")
             or 0
         )
     except (TypeError, ValueError):
@@ -403,7 +405,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
     # Vorlagenkarte und der Format-Gerüste.
     template_language = str(
         extra.get("template_language")
-        or _env("NEXTCLOUD_DECK_TEMPLATE_LANGUAGE", "NEXTCLOUD_DECK_TEMPLATE_LANGUAGE")
+        or _env("NEXTCLOUD_DECK_TEMPLATE_LANGUAGE")
         or DEFAULT_TEMPLATE_LANGUAGE
     ).strip().lower()
     if template_language not in TEMPLATE_LANGUAGES:
@@ -464,14 +466,18 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         destructive_patterns = [str(p).strip() for p in raw_destructive if str(p).strip()]
 
     # Friendly-Label-Mapping aus der Config (platforms.deck.extra.label_mapping).
-    # Fehlt es, gilt das Default-Mapping in workflow.py. Wird global angewendet,
-    # damit alle Adapter-Instanzen (und der Prompt-Bau) dasselbe Mapping nutzen.
+    # Fehlt es, gilt das Default-Mapping in workflow.py.
+    #
+    # WICHTIG (ARCH-003): Hier wird das Mapping NUR als Daten in den
+    # RuntimeConfig kapseliert — NICHT angewendet (keine Mutation des
+    # modul-globalen FRIENDLY_LABELS/LABEL_ALIASES). validate_deck_config und
+    # check_is_connected sind Read-Pfade (Gateway-Config-Validierung, Dashboard-
+    # Status-Polls) und müssen rein bleiben. Die Anwendung des Mappings erfolgt
+    # ausschließlich bei der Adapter-Konstruktion (NextcloudDeckPlatform.__init__
+    #), dem Live-Pfad.
     label_mapping = extra.get("label_mapping")
-    if isinstance(label_mapping, dict) and label_mapping:
-        try:
-            configure_friendly_labels(label_mapping)
-        except Exception as exc:
-            logger.warning("Deck: label_mapping aus Config konnte nicht angewendet werden: %s", exc)
+    if not (isinstance(label_mapping, dict) and label_mapping):
+        label_mapping = None
 
     return DeckRuntimeConfig(
         base_url=base_url,
@@ -488,6 +494,7 @@ def _build_runtime_config(config: PlatformConfig) -> DeckRuntimeConfig:
         template_language=template_language,
         speed_enabled=speed_enabled,
         speed_url=speed_url,
+        label_mapping=label_mapping,
     )
 
 
@@ -519,6 +526,18 @@ class NextcloudDeckPlatform(BasePlatformAdapter):
         global _LIVE_ADAPTER_REF
         _LIVE_ADAPTER_REF = self
         self.runtime = _build_runtime_config(config)
+        # ARCH-003: Friendly-Label-Mapping HIER (Live-Pfad / Konstruktor) anwenden,
+        # NICHT in der Config-Validierung. So bleibt validate_deck_config /
+        # check_is_connected rein (keine globale Seitewirkung auf
+        # FRIENDLY_LABELS/LABEL_ALIASES). Mehrere Adapter-Instanzen im selben
+        # Prozess teilen weiterhin das globale Mapping ("last one wins") — das
+        # ist inhärent dem modul-globalen Design, aber jetzt nur noch im
+        # Live-Pfad, nie im Validierungs-Pfad.
+        if self.runtime.label_mapping:
+            try:
+                configure_friendly_labels(self.runtime.label_mapping)
+            except Exception as exc:
+                logger.warning("Deck: label_mapping aus Config konnte nicht angewendet werden: %s", exc)
         self.client = NextcloudDeckClient(
             self.runtime.base_url,
             self.runtime.username,
@@ -2832,6 +2851,13 @@ def _destructive_tool_hook(tool_name: str = "", args: Any = None, **kwargs: Any)
     raise DestructiveToolBlocked(reason)
 
 
+# Skills, die zu DIESEM Plugin gehören und von register() registriert werden.
+# ARCH-001: explizite Whitelist — andere Skills im skills/-Verzeichnis (z. B. das
+# fachlich unverwandte 'openwisp-template-update') werden NICHT mitregisted, um
+# Namensraum-Kopplung an fremde Domänen zu vermeiden. Neue Plugin-Skills hier ergänzen.
+PLUGIN_SKILLS: tuple[str, ...] = ("nextcloud-deck",)
+
+
 def register(ctx: Any) -> None:
     ctx.register_platform(
         name="deck",
@@ -2877,6 +2903,9 @@ def register(ctx: Any) -> None:
     skills_dir = Path(__file__).parent / "skills"
     if skills_dir.is_dir():
         for child in sorted(skills_dir.iterdir()):
+            # ARCH-001: nur zum Plugin gehörende Skills registrieren (Whitelist).
+            if child.name not in PLUGIN_SKILLS:
+                continue
             skill_md = child / "SKILL.md"
             if child.is_dir() and skill_md.is_file():
                 ctx.register_skill(child.name, skill_md)

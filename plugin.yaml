@@ -1,3 +1,11 @@
+# Hinweis (ARCH-002): Der Laufzeit-Plattform-Key ist `deck`
+# (register_platform(name="deck") in adapter.py), NICHT der Manifest-Name
+# `nextcloud-deck-platform` darunter. Das ist die dokumentierte
+# Hermes-Plattform-Plugin-Konvention (Kürzel = Plattform-Key, `<kürzel>-platform`
+# = Manifest-Name — vgl. hermes-agent „Adding Platform Adapters“:
+# register_platform(name="myplatform") + Manifest `name: myplatform-platform`).
+# Die beiden sind also intentional unterschiedlich und dürfen nicht
+# "vereinheitlicht" werden (würde das Laufzeit-Verhalten brechen).
 name: nextcloud-deck-platform
 label: Nextcloud Deck
 kind: platform

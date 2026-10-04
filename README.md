@@ -12,7 +12,11 @@ The integration is deliberately small and safe:
 - Deck comments are sent using JSON as documented by the Deck API;
 - API/network errors are surfaced instead of being silently converted to empty lists;
 - polling reports a connection only after an API request succeeds;
-- plugin-provided skills use Hermes' namespaced skill mechanism.
+- plugin-provided skills use Hermes' namespaced skill mechanism;
+- the platform key is `deck` (via `ctx.register_platform(name="deck")`), which
+  intentionally differs from the manifest name `nextcloud-deck-platform` — this is
+  Hermes' documented platform-plugin convention (short key + `<key>-platform` manifest
+  name), so the two are not meant to match.
 
 ## Repository layout
 
@@ -24,17 +28,31 @@ The integration is deliberately small and safe:
 ├── workflow.py             # Workflow, Phasen, Gates & Subtask-Logik (Konzept v5)
 ├── identity.py             # DeckIdentityResolver: actor resolution, group lookup, ContextVars
 ├── outbound.py             # Outbound message categorization (lifecycle/error/suppress/forward)
-├── state.py                # Card snapshot & deduplication state
+├── presence.py             # DeckPresenceManager: Bot-User Presence + Custom-Status (online/busy)
+├── state.py                # Card snapshot & deduplication state (persisted under ~/.hermes)
 ├── plugin.yaml             # Plugin metadata (v0.5.0)
 ├── docs/
 │   └── workflow-concept-v5.md # Vollständiges Workflow-Konzept
+├── scripts/
+│   ├── ollama-speed-exporter.py # Sidecar-Export für die Live-Token-Geschwindigkeit (speed feature)
+│   └── rename_labels.sh          # Hilfsskript zum Umbenennen von Deck-Labels
 ├── skills/
-│   └── nextcloud-deck/     # Bundled skill (namespaced via ctx.register_skill)
-│       └── SKILL.md
+│   ├── nextcloud-deck/     # Bundled skill (namespaced via ctx.register_skill)
+│   │   ├── SKILL.md
+│   │   └── __init__.py
+│   └── openwisp-template-update/ # AUF DER PLATTE, aber NICHT registriert
+│       └── SKILL.md        # (ARCH-001: Skills-Whitelist adapter.py:PLUGIN_SKILLS)
 └── tests/
     ├── test_phase1_adapter.py
     ├── test_platform_contract.py
-    └── test_workflow_gates.py
+    ├── test_workflow_gates.py
+    ├── test_dotenv_and_store.py
+    ├── test_env_dedup.py
+    ├── test_label_mapping_pure.py
+    ├── test_platform_key.py
+    ├── test_skill_whitelist.py
+    ├── test_state_path.py
+    └── test_wip_limit.py
 ```
 
 ## Installation
@@ -54,7 +72,7 @@ platform in `config.yaml` (see Configuration below).
 
 ```yaml
 platforms:
-  nextcloud_deck:
+  deck:                    # Plattform-Key (register_platform(name="deck")) — nicht der Manifest-Name
     enabled: true
     extra:
       base_url: "https://cloud.example.org"
@@ -65,6 +83,12 @@ platforms:
       poll_interval_seconds: 30
       backlog_format_quiet_seconds: 300   # optional: siehe unten
       max_in_progress: 1                  # optional: WIP-Limit, 0 = unbegrenzt
+      template_language: "de"             # optional: de|en, Sprache der Vorlagen (Default de)
+      bot_aliases: "deck-bot, hermes"     # optional: Komma-String oder Liste, zusätzliche Bot-Aliase
+      speed_enabled: false                # optional: Live-Token-Geschwindigkeit im Status (Default false)
+      speed_url: "https://ollama.example.org/speed"  # optional: Ollama-Sidecar-URL (zu speed_enabled)
+      label_mapping: {}                   # optional: Friendly-Label-Mapping (Default in workflow.py)
+      destructive_tool_patterns: "rm -rf, drop "  # optional: Muster für Gate 3 (Default-Liste in workflow.py)
       boards:
         - board_id: "7"
 ```
@@ -93,6 +117,32 @@ are **not** started until a running one moves to `Review`/`Blocked`/`Done`; the
 queued card gets the `⏳ Waiting` label so it is visible that the adapter saw it
 but is busy. Set `1` to force strictly sequential execution so the model never
 multitasks across cards. Also settable via `NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
+
+`template_language` is optional (default `de`). It selects the language of the
+auto-created template card and the format scaffolds. Accepts `de` or `en`; any
+other value falls back to `de`. Also settable via `NEXTCLOUD_DECK_TEMPLATE_LANGUAGE`.
+
+`bot_aliases` is optional. It lists additional bot-alias names (comma-separated
+string or YAML list, matched case-insensitively) that identity resolution also
+treats as the bot user, not as a human commenter. Also settable via
+`NEXTCLOUD_DECK_BOT_ALIASES` or `NEXTCLOUD_BOT_ALIASES`.
+
+`speed_enabled` (default `false`) and `speed_url` are optional and opt in to the
+live token-generation speed (tokens/s) shown in the bot user's status, fetched
+from an Ollama sidecar. Set `speed_enabled: true` and point `speed_url` at the
+sidecar endpoint (e.g. `https://ollama.example.org/speed`). A helper exporter
+lives in `scripts/ollama-speed-exporter.py`. Off by default, so no sidecar is
+required.
+
+`label_mapping` is optional. It maps friendly (display) labels to canonical
+workflow labels. When omitted, the built-in default mapping in `workflow.py`
+applies. (Per ARCH-003 it is applied only at adapter construction — the live
+path — so config validation stays pure.)
+
+`destructive_tool_patterns` is optional. It is the list of tool-name/argument
+patterns that Gate 3 treats as *destructive* and blocks at `risk:high`. Accepts a
+comma-separated string or a list. When omitted, the built-in default list in
+`workflow.py` applies.
 
 ## Diagnostics
 
@@ -123,6 +173,25 @@ warns loudly if a **required** column is missing. Required columns:
 Look for `Deck Board-Eignung` (suitable) or `Deck Board NICHT geeignet` in
 `gateway.log` right after startup. A non-suitable board is logged but does **not**
 block the gateway.
+
+## Presence & status
+
+While a card turn is active, the adapter reflects the bot user's activity in
+Nextcloud's user-status (Talk-style), managed by `presence.py`
+(`DeckPresenceManager`):
+
+- **Presence state** (`online` / `busy`): `set_busy()` / `clear_busy()` are
+  reference-counted across concurrent turns — the user shows `busy` while at
+  least one card turn is running and returns to `online` once the last one ends.
+- **Custom status message**: `set_custom_status_message()` sets a short status
+  line with an icon (e.g. `✍️ Antwortet`, `🛠️ Führt Werkzeuge aus`), capped at
+  140 characters; `clear_custom_status_message()` removes it.
+- **Live token speed**: when `speed_enabled` is set (see Configuration), the
+  token-generation speed (t/s) is surfaced in the status via the Ollama sidecar.
+
+These are written through the Nextcloud OCS `user_status` API
+(`apps/user_status/api/v1/user_status/...`). Because Talk and Deck never drive the
+model at the same time, the bot user's status is globally unambiguous.
 
 ## Tests
 
