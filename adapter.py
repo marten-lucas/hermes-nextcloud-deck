@@ -105,6 +105,7 @@ try:
         speed_suffix,
     )
     from .ingestion import (
+        auto_resume_pass,
         card_label_titles,
         comment_id,
         last_comment_author,
@@ -141,6 +142,7 @@ except ImportError:  # direct test/import
         speed_suffix,
     )
     from ingestion import (
+        auto_resume_pass,
         card_label_titles,
         comment_id,
         last_comment_author,
@@ -230,6 +232,13 @@ class DeckRuntimeConfig:
     template_language: str = DEFAULT_TEMPLATE_LANGUAGE
     speed_enabled: bool = False
     speed_url: str = ""
+    # Auto-Resume (R1–R7): nach Gateway-Restart und bei Leerlauf werden
+    # unterbrochene Läufe (aktive Spalten) bzw. neu freigegebene Review-Karten
+    # automatisch gestartet, statt idle auf einen manuellen Trigger zu warten.
+    # Default AN — der Budget-Mechanismus (max_auto_resumes_per_card) ist der
+    # Loop-Schutz. 0 als max_auto_resumes_per_card = Auto-Resume komplett aus.
+    auto_resume: bool = True
+    max_auto_resumes_per_card: int = 3
     # Rohes label_mapping aus der Config (Data-only). ARCH-003: Wird in
     # _build_runtime_config NUR gespeichert, NICHT angewendet. Die Anwendung
     # (Mutation des modul-globalen FRIENDLY_LABELS) erfolgt ausschließlich im
@@ -479,6 +488,33 @@ def _build_runtime_config(config: Any) -> DeckRuntimeConfig:
         or _env("NEXTCLOUD_DECK_SPEED_URL")
     ).strip().rstrip("/")
 
+    # Auto-Resume (R1–R7): Default AN (Anforderung: System soll nach
+    # Gateway-Restart / bei Leerlauf nicht idle auf Trigger warten). Die
+    # explizite None-Prüfung bei extra: ein bewusstes ``auto_resume: false``
+    # in der Config muss das Default überstimmen — die übliche
+    # ``extra or env``-Kette würde falsy-Werte verwerfen.
+    auto_resume_raw = extra.get("auto_resume")
+    if auto_resume_raw is None:
+        auto_resume = _env_bool("NEXTCLOUD_DECK_AUTO_RESUME", "DECK_AUTO_RESUME", default=True)
+    else:
+        auto_resume = bool(auto_resume_raw)
+
+    # Bewusste None-Prüfung: ein explizites ``max_auto_resumes_per_card: 0``
+    # (Auto-Resume komplett aus) darf NICHT von der ``or``-Kette als
+    # "nicht gesetzt" verworfen werden — sonst würde die Config den
+    # Loop-Schutz statt Auto-Resume abschalten.
+    cap_raw = extra.get("max_auto_resumes_per_card")
+    if cap_raw is None:
+        cap_raw = _env("NEXTCLOUD_DECK_MAX_AUTO_RESUMES_PER_CARD")
+    if cap_raw in (None, ""):
+        cap_raw = 3
+    try:
+        max_auto_resumes = int(cap_raw)
+    except (TypeError, ValueError):
+        max_auto_resumes = 3
+    if max_auto_resumes < 0:
+        max_auto_resumes = 0
+
     boards: Dict[str, Dict[str, Any]] = {}
     raw_boards = extra.get("boards") or []
     if isinstance(raw_boards, list):
@@ -551,6 +587,8 @@ def _build_runtime_config(config: Any) -> DeckRuntimeConfig:
         template_language=template_language,
         speed_enabled=speed_enabled,
         speed_url=speed_url,
+        auto_resume=auto_resume,
+        max_auto_resumes_per_card=max_auto_resumes,
         label_mapping=label_mapping,
     )
 
@@ -1253,7 +1291,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         board: Dict[str, Any],
         stack: Dict[str, Any],
         card: Dict[str, Any],
+        force_resume: bool = False,
     ) -> None:
+        """Verarbeitet eine Karte (Trigger-Prüfung bis Agent-Run).
+
+        ``force_resume=True`` (Auto-Resume-Pass, → resume.py): Die
+        Trigger-/Dedupe-Filter werden umgangen — die Kandidaten-Eignung
+        (Spaltenlage, Zuweisung, neue Freigabe, Budget) wurde bereits im
+        Pass geprüft. Backlog-Filter und WIP-Guard bleiben aktiv (Defensive
+        in Depth). Ohne ``force_resume`` ändert sich das Verhalten nicht.
+        """
         board_id = str(board.get("id") or "").strip()
         stack_id = str(stack.get("id") or "").strip()
         card_id = str(card.get("id") or "").strip()
@@ -1272,7 +1319,10 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         # zugewiesen ist. Sonst laufen nach einem Gateway-Restart mehrere Karten
         # parallel (WIP-Verletzung), weil der Fingerprint-Cache leer ist und jede
         # zugewiesene Karte als "neu" getriggert wird (siehe Karte 121 in Review).
-        if is_terminal_stack(stack, board_config):
+        # AUSNAHME (force_resume): neu freigegebene Review-Karten sind explizite
+        # Auto-Resume-Kandidaten (R1–R7) — sonst würden erteilte Freigaben idle
+        # bleiben, weil der Polling-Pfad End-Spalten bewusst ignoriert.
+        if is_terminal_stack(stack, board_config) and not force_resume:
             logger.debug(
                 "Nextcloud Deck: Karte %s liegt in End-Spalte ('%s') und wird ignoriert.",
                 card_id, stack.get("title"),
@@ -1280,7 +1330,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             return
 
         comments = await self.client.get_card_comments(card_id)
-        if not self._card_is_triggered(card, comments):
+        if not self._card_is_triggered(card, comments) and not force_resume:
             return
 
         # Deck-API liefert Kommentare absteigend (neueste zuerst) — für eine
@@ -1326,32 +1376,45 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 card_id,
                 ", ".join(label_titles),
             )
-        elif last_author and (
-            last_author == self.runtime.username
-            or last_author == self.runtime.hermes_user_id
-            or last_author.lower() in {*self.runtime.bot_aliases, "system", "changelog", "sample"}
+        elif (
+            not force_resume
+            and last_author
+            and (
+                last_author == self.runtime.username
+                or last_author == self.runtime.hermes_user_id
+                or last_author.lower() in {*self.runtime.bot_aliases, "system", "changelog", "sample"}
+            )
         ):
             logger.debug("Nextcloud Deck: Ignoriere eigenen oder System-Kommentar (Author: %s)", last_author)
             return
 
         # 2. Native Nextcloud System-Message / System-Event Flags auswerten
-        if last and (last.get("systemMessage") or last.get("system_message")):
+        #    (force_resume: Eigen-Kommentar-Logik oben ist umgangen — der
+        #    unterbrochene Lauf ist der Kontext, kein Filter-Grund.)
+        if not force_resume and last and (last.get("systemMessage") or last.get("system_message")):
             logger.debug("Nextcloud Deck: Ignoriere native SystemMessage auf Karte %s", card_id)
             return
 
         # 3. Ignoriere systemgenerierte Textnachrichten & Platzhalter
         last_message = str(last.get("message") or "") if last else ""
         if (
-            "{actor}" in last_message
-            or "Das System hat" in last_message
-            or "Gesprächseinstellungen verwalten" in last_message
-            or "Unterhaltungsinformationen bearbeiten" in last_message
+            not force_resume
+            and (
+                "{actor}" in last_message
+                or "Das System hat" in last_message
+                or "Gesprächseinstellungen verwalten" in last_message
+                or "Unterhaltungsinformationen bearbeiten" in last_message
+            )
         ):
             logger.debug("Nextcloud Deck: Ignoriere automatische System-Textnachricht auf Karte %s", card_id)
             return
         # -------------------------------------
 
-        if not self.state.should_process(snapshot):
+        # Dedupe: Zustand seit letztem Lauf unverändert → kein neuer Trigger.
+        # (force_resume: Der Zustand ist per Definition unverändert — genau
+        # deshalb ist die Karte ein Auto-Resume-Kandidat. Budget + Eignung
+        # wurden im Pass geprüft.)
+        if not force_resume and not self.state.should_process(snapshot):
             return
 
         # WIP-Limit: Ist max_in_progress > 0 und bereits so viele ANDERE Karten
@@ -1773,6 +1836,16 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         entsteht eine Re-Trigger-Schleife nach einem Review-Move.
         """
         await rebaseline_card(self, board_id, stack_id, card_id)
+
+    async def _auto_resume_pass(self) -> int:
+        """Ein Auto-Resume-Pass: idle-Warteschleife verhindern (→ resume.py).
+
+        Startet — nur wenn KEIN Turn läuft — unterbrochene Läufe in aktiven
+        Spalten bzw. neu freigegebene Review-Karten (R1–R7). Wird nach jedem
+        Poll-Zyklus aufgerufen; der erste nach ``connect()`` ist der
+        Startup-Pass.
+        """
+        return await auto_resume_pass(self)
 
     async def poll_once(self) -> int:
         """Ein Poll-Zyklus über alle konfigurierten Boards (→ ingestion.py).

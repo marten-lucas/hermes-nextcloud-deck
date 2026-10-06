@@ -248,7 +248,43 @@ eigenständig von `plan` nach `execute` wechseln.
 
 ---
 
-## 12. Design-Prinzipien (Zusammenfassung)
+## 12. Auto-Resume (Vermeidung von Idle-Warteschleifen)
+
+**Problem:** Nach einem Gateway-Restart (oder bei leerem Fingerprint-Cache nach
+fehlgeschlagenen Läufen) liegen fertige bzw. unterbrochene Karten in aktiven
+Spalten, und erteilte Freigaben warten in `Review` — das System ist idle und
+wartet auf einen manuellen Trigger, obwohl die Arbeit bereits bereit liegt.
+
+**Mechanik** (`ingestion.auto_resume_pass`, nach jedem Poll-Zyklus — der erste
+nach `connect()` ist der Startup-Pass):
+
+1. **Nur wenn kein Turn in-flight ist** (`in_flight_count == 0`, unabhängig vom
+   WIP-Limit) — laufende Turns werden nicht parallel überholt.
+2. **Kandidaten Priorität 1 — `active_work`:** dem Bot zugewiesene Karten in
+   aktiven Spalten (`Todo`/`Ready`/`Running`/…) ohne frischen Trigger (z. B.
+   durch Gateway-Restart unterbrochen). Backlog bleibt unberührt.
+3. **Kandidaten Priorität 2 — `review_approved`:** Karten in `Review` mit
+   `hermes/approval:approved`, das seit dem letzten Lauf gesetzt wurde (neue
+   menschliche Freigabe). Konsumierte Freigaben (schon in der Baseline) und
+   `Blocked`/`Done` sind **keine** Kandidaten.
+4. **Start mit `force_resume`** — die Trigger-/Dedupe-Filter werden umgangen
+   (die Eignung ist im Pass geprüft), WIP-Guard und Backlog-Filter bleiben aktiv
+   (Defense in Depth). `pre_tool_call` (Gate 3) gilt unverändert.
+5. **Loop-Schutz — Budget pro Karten-Zyklus:** `max_auto_resumes_per_card`
+   (Default 3) Läufe pro Zyklus, persistiert im State. Ein Zyklus ist die
+   Karten-Fingerprint-Ära: neue Freigabe, Edit oder Move = frisches Budget.
+   Erschöpftes Budget = klares Log, manueller Trigger (Kommentar/Zuweisung)
+   nötig.
+6. **Batch-Größe:** `max_in_progress` wird respektiert; bei `0` (unbegrenzt)
+   startet der Pass pro Zyklus genau eine Karte (Ollama-Overload-Schutz).
+
+**Konfiguration:** `auto_resume` (Default `true`), `max_auto_resumes_per_card`
+(Default 3; `0` = Auto-Resume komplett aus). Env: `NEXTCLOUD_DECK_AUTO_RESUME`,
+`NEXTCLOUD_DECK_MAX_AUTO_RESUMES_PER_CARD`.
+
+---
+
+## 13. Design-Prinzipien (Zusammenfassung)
 
 1. **Deck ist UI, nicht Workflow-Engine** — Hermes besitzt Ausführung und Task-Lifecycle.
 2. **State beschreibt Scheduling, nicht Semantik** — `running` heißt „Agent arbeitet", nicht „Implementation". Fachliche Phase steckt im Label.
@@ -260,3 +296,4 @@ eigenständig von `plan` nach `execute` wechseln.
 8. **Blocked ist semantisch** — mit Grund und benötigtem Input, nicht nur rote Spalte.
 9. **Progressive Autonomy** — je höher das Risiko, desto mehr menschliche Gates.
 10. **Backlog ist separates Eintrittstor** — Ideen warten dort, bis der Mensch sie bewusst nach TRIAGE zieht; der Agent fasst sie dort nicht an.
+11. **Idle ist die Ausnahme** — wenn Arbeit bereit liegt (erteilte Freigabe, unterbrochener Lauf), startet der Adapter sie autonom (Auto-Resume, §12); ein menschlicher Trigger ist kein Erfordernis.

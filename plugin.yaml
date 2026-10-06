@@ -61,3 +61,11 @@ optional_env:
     description: "URL of the Ollama speed sidecar endpoint (e.g. https://ollama.cloud.kiga-gramschatz.de/speed)"
     prompt: "Ollama speed sidecar URL"
     password: false
+  - name: NEXTCLOUD_DECK_AUTO_RESUME
+    description: "Auto-resume interrupted work after gateway restart and during idle (running cards + newly approved review cards); default true"
+    prompt: "Enable auto-resume"
+    password: false
+  - name: NEXTCLOUD_DECK_MAX_AUTO_RESUMES_PER_CARD
+    description: "Max auto-resume runs per card per work cycle (loop protection); 0 = auto-resume off (default 3)"
+    prompt: "Max auto-resumes per card"
+    password: false

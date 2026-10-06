@@ -92,6 +92,8 @@ platforms:
       bot_aliases: "deck-bot, hermes"     # optional: Komma-String oder Liste, zusätzliche Bot-Aliase
       speed_enabled: false                # optional: Live-Token-Geschwindigkeit im Status (Default false)
       speed_url: "https://ollama.example.org/speed"  # optional: Ollama-Sidecar-URL (zu speed_enabled)
+      auto_resume: true                   # optional: unterbrochene/freigegebene Karten auto-starten (Default true)
+      max_auto_resumes_per_card: 3        # optional: Auto-Resume-Budget pro Karten-Zyklus, 0 = aus (Default 3)
       label_mapping: {}                   # optional: Friendly-Label-Mapping (Default in workflow.py)
       destructive_tool_patterns: "rm -rf, drop "  # optional: Muster für Gate 3 (Default-Liste in workflow.py)
       boards:
@@ -148,6 +150,30 @@ path — so config validation stays pure.)
 patterns that Gate 3 treats as *destructive* and blocks at `risk:high`. Accepts a
 comma-separated string or a list. When omitted, the built-in default list in
 `workflow.py` applies.
+
+`auto_resume` (default `true`) and `max_auto_resumes_per_card` (default `3`)
+control **auto-resume**: after a gateway restart and whenever the adapter is
+idle, work that is already ready is started automatically instead of waiting
+for a manual trigger. Candidate priority:
+
+1. **Active work** — bot-assigned cards in active columns (`Todo`/`Ready`/
+   `Running`/…) without a fresh trigger, e.g. turns interrupted by a gateway
+   restart (their fingerprint baseline is unchanged, so the normal polling
+   path skips them).
+2. **New approval in Review** — cards in the `Review` column whose
+   `hermes/approval:approved` label appeared since the last run (a consumed
+   approval never re-triggers; `Blocked`/`Done` are never auto-resumed).
+
+Auto-resume only fires when **no turn is in flight** (independent of the WIP
+limit), respects `max_in_progress` (batch size; with `0` = unlimited it starts
+exactly one card per pass as a load guard), and is loop-protected by a per-card
+budget of `max_auto_resumes_per_card` runs per card cycle. A card cycle is
+identified by its state fingerprint — a new human approval, edit or move resets
+the budget. An exhausted budget logs clearly and requires a manual trigger
+(comment/assignment) or a state-file budget reset. Set `auto_resume: false` or
+`max_auto_resumes_per_card: 0` to disable entirely. Also settable via
+`NEXTCLOUD_DECK_AUTO_RESUME` and
+`NEXTCLOUD_DECK_MAX_AUTO_RESUMES_PER_CARD`.
 
 ## Diagnostics
 
@@ -272,6 +298,12 @@ All labels (including `waiting`) are configurable via `extra.label_mapping` in
      wait until the active one reaches `Review`/`Blocked`/`Done`.
 5. When done, the agent moves the card to **`Review`** (and sets `hermes/approval:required`) — it never moves to `Done` (Gate 2).
 6. **You review** the result and move it to **`Done`**.
+
+**Auto-resume (default on)** — the system does not wait for a manual trigger when work is already ready:
+
+- Setting `hermes/approval:approved` on a `Review` card makes the agent pick it up automatically — no move or comment needed.
+- After a gateway restart, interrupted work in active columns is continued on the next polling cycle.
+- A per-card budget (default 3 runs per card cycle) prevents loops; an exhausted budget is logged clearly and needs a manual trigger (see `auto_resume` in Configuration).
 
 ### Risk & type — how the flow differs
 

@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,12 @@ class DeckStateManager:
         # nächsten Agent-Lauf nur die NEUEN Kommentare (id > Baseline) als
         # Kontext zu übergeben, statt nur den allerletzten.
         self._last_comment_ids: Dict[str, Optional[int]] = {}
+        # Auto-Resume-Budget pro Karte (key → {"count": int, "fp": str}).
+        # "count" = verbrauchte Auto-Resume-Läufe im aktuellen Karten-Zyklus;
+        # "fp" identifiziert den Zyklus (Karten-Fingerprint). Ein Fingerprint-
+        # Wechsel (neue Freigabe, Edit, Move) bedeutet einen neuen Zyklus und
+        # setzt das Budget automatisch zurück (siehe auto_resume_budget_left).
+        self._auto_resume: Dict[str, Dict[str, Any]] = {}
         # Persistenz: Der State wird in einer JSON-Datei gespeichert, damit er
         # nach einem Gateway-Restart erhalten bleibt. Sonst gilt nach jedem
         # Restart jede Karte in einer aktiven Spalte als "neu" (Fingerprint-
@@ -96,6 +102,10 @@ class DeckStateManager:
                 k: (int(v) if v is not None else None)
                 for k, v in (data.get("last_comment_ids") or {}).items()
             }
+            self._auto_resume = {
+                k: dict(v) for k, v in (data.get("auto_resume") or {}).items()
+                if isinstance(v, dict)
+            }
         except Exception:
             # Best-effort: Ein korrupter State darf den Adapter nicht blockieren.
             self._fingerprints = {}
@@ -112,6 +122,7 @@ class DeckStateManager:
                 "fingerprints": self._fingerprints,
                 "last_labels": self._last_labels,
                 "last_comment_ids": self._last_comment_ids,
+                "auto_resume": self._auto_resume,
             }
             tmp = self._state_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -157,6 +168,35 @@ class DeckStateManager:
             except (ValueError, TypeError):
                 pass
         self.save()
+
+    def auto_resume_budget_left(
+        self, board_id: str, card_id: str, cap: int, fingerprint: str
+    ) -> int:
+        """Verbleibendes Auto-Resume-Budget für eine Karte (0 = erschöpft).
+
+        Ein Fingerprint-Wechsel (neue Freigabe, Edit, Move) bedeutet einen
+        neuen Bearbeitungszyklus und liefert das VOLLE Budget zurück —
+        so bekommt jede menschliche Freigabe ein frisches Budget, während
+        wiederholte (auto-)Resume-Läufe im selben Zyklus gegen das Budget
+        anrechnen (Loop-Schutz).
+        """
+        if cap <= 0:
+            return 0
+        entry = self._auto_resume.get(self._key(board_id, card_id)) or {}
+        if str(entry.get("fp")) != str(fingerprint):
+            return cap
+        return max(cap - int(entry.get("count") or 0), 0)
+
+    def record_auto_resume(self, board_id: str, card_id: str, fingerprint: str) -> int:
+        """Buchung eines Auto-Resume-Laufs. Rückgabe: verbrauchtes Budget."""
+        key = self._key(board_id, card_id)
+        entry = self._auto_resume.get(key) or {}
+        if str(entry.get("fp")) != str(fingerprint):
+            entry = {"count": 0, "fp": str(fingerprint)}
+        entry["count"] = int(entry.get("count") or 0) + 1
+        self._auto_resume[key] = entry
+        self.save()
+        return int(entry["count"])
 
     def mark_seen(self, snapshot: DeckCardSnapshot) -> None:
         """Nur Dedupe-Baseline setzen (Fingerprint + Labels), ohne die

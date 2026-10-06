@@ -42,29 +42,37 @@ async def active_turn(adapter, card_id: str):
         adapter._active_turns.discard(card_id)
 
 
-async def count_active_cards(adapter, exclude_card_id: Optional[str] = None) -> int:
-    """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
-
-    Wird für das GLOBALE WIP-Limit genutzt. Nur Karten, deren Turn gerade
-    aktiv läuft (``_active_turns``), zählen gegen das Limit. Karten, die nur
-    in einer aktiven Spalte (todo/ready/running) liegen, aber KEINEN Turn
-    laufen, zählen NICHT — sonst blockiert eine fertige Karte in Ready das
-    WIP-Limit, obwohl sie gar nicht arbeitet.
-
-    ``exclude_card_id`` blendet die aktuell betrachtete Karte aus, damit
-    deren eigener Status nicht die Zählung verfälscht.
-    """
-    if not adapter.runtime.max_in_progress:
-        return 0
+def in_flight_count(adapter, exclude_card_id: Optional[str] = None) -> int:
+    """Anzahl der tatsächlich laufenden (in-flight) Turns — UNABHÄNGIG vom
+    WIP-Limit. Im Gegensatz zu ``count_active_cards``, das bei
+    ``max_in_progress=0`` (unbegrenzt) per Definition 0 liefert, zählt diese
+    Funktion ``_active_turns`` immer — sie ist die Basis der Idle-Prüfung im
+    Auto-Resume-Pass (sonst würde bei Default-Konfiguration parallel zu einem
+    laufenden Turn gestartet)."""
     total = 0
-    # In-Flight-Turns: Karten, deren Turn gerade aktiv läuft (add in
-    # _process_card vor dem Agent-Run, discard im finally). Das ist die
-    # einzige zuverlässige Zählung — unabhängig vom Speed-Feature (FUNC-002).
     for cid in adapter._active_turns:
         if exclude_card_id and cid == exclude_card_id:
             continue
         total += 1
     return total
+
+
+async def count_active_cards(adapter, exclude_card_id: Optional[str] = None) -> int:
+    """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
+
+    Wird für das GLOBALE WIP-LIMIT genutzt. Nur Karten, deren Turn gerade
+    aktiv läuft (``_active_turns``), zählen gegen das Limit. Karten, die nur
+    in einer aktiven Spalte (todo/ready/running) liegen, aber KEINEN Turn
+    laufen, zählen NICHT — sonst blockiert eine fertige Karte in Ready das
+    WIP-Limit, obwohl sie gar nicht arbeitet.
+
+    Bei ``max_in_progress=0`` (unbegrenzt) gibt es kein Limit zu prüfen —
+    daher 0 (WIP-Semantik). Für die Idle-Prüfung (Auto-Resume) ist
+    ``in_flight_count`` die richtige Basis.
+    """
+    if not adapter.runtime.max_in_progress:
+        return 0
+    return in_flight_count(adapter, exclude_card_id)
 
 
 def card_is_triggered(adapter, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
