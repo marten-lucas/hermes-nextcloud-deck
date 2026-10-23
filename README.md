@@ -73,6 +73,16 @@ Set the required environment variables (`NEXTCLOUD_DECK_BASE_URL`,
 `~/.hermes/.env` or via `hermes plugins install` prompts — and enable the
 platform in `config.yaml` (see Configuration below).
 
+After changing `python_dependencies` in this manifest, Hermes must re-admit the plugin so the managed dependency graph includes the new requirement. If the plugin was already enabled, run:
+
+```bash
+hermes plugins disable nextcloud-deck-platform
+hermes plugins enable nextcloud-deck-platform
+hermes gateway restart
+```
+
+`hermes pm repair` rebuilds the recorded dependency graph; it does not discover changes to plugin manifests. Do not install dependencies with system-level `pip`—Hermes uses managed environments.
+
 ## Configuration
 
 ```yaml
