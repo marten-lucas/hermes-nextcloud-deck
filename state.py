@@ -45,6 +45,10 @@ class DeckCardSnapshot:
             json.dumps(payload, sort_keys=True, default=str).encode()
         ).hexdigest()
 
+    def revision_id(self) -> str:
+        """Stabile Hermes-Request-ID für genau diese Kartenrevision."""
+        return self.fingerprint()
+
 
 class DeckStateManager:
     """In-memory deduplication for one adapter process.

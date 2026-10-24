@@ -1477,7 +1477,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             chat_type="deck_card",
             user_id=actor_id,
             user_name=actor_id,
-            message_id=card_id,
+            message_id=snapshot.revision_id(),
         )
         headers = self.identity.principal_headers(principal) or {
             "X-On-Behalf-Of": actor_id,
@@ -1604,7 +1604,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                     },
                 },
             },
-            message_id=card_id,
+            message_id=snapshot.revision_id(),
             user_id=actor_id,
             user_name=actor_id,
         )
