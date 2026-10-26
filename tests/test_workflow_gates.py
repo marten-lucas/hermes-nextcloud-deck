@@ -1,6 +1,7 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from adapter import (
     DECK_CARD_ACTION_SCHEMA,
@@ -385,20 +386,46 @@ class TestWorkflowLogic(unittest.TestCase):
         # Gate 1: Agent in 'plan' darf nicht nach 'running' ohne approval —
         # aber nur bei implementation-Typ (oder risk >= medium)
         allowed, reason = check_agent_status_gate(
-            STATUS_RUNNING, PHASE_PLAN, APPROVAL_REQUIRED, task_type="implementation"
+            STATUS_RUNNING, PHASE_PLAN, APPROVAL_REQUIRED, task_type="implementation", risk="low"
         )
         self.assertFalse(allowed)
         self.assertIn("Gate 1", reason or "")
 
         # Mit approval erlaubt
         allowed, reason = check_agent_status_gate(
-            STATUS_RUNNING, PHASE_PLAN, APPROVAL_APPROVED, task_type="implementation"
+            STATUS_RUNNING, PHASE_PLAN, APPROVAL_APPROVED, task_type="implementation", risk="low"
         )
         self.assertTrue(allowed)
 
-        # Verschieben nach review ist in der Plan-Phase immer erlaubt (für Approval-Anforderung)
+        # Fehlende Triage-Klassifikation blockiert auch den Review-Move.
         allowed, reason = check_agent_status_gate(STATUS_REVIEW, PHASE_PLAN, APPROVAL_REQUIRED)
-        self.assertTrue(allowed)
+        self.assertFalse(allowed)
+        self.assertIn("Klassifikation", reason or "")
+
+        allowed, reason = check_agent_status_gate(
+            STATUS_REVIEW, PHASE_PLAN, APPROVAL_REQUIRED,
+            task_type="documentation", risk="low",
+        )
+        self.assertTrue(allowed, msg=reason)
+
+    def test_forward_status_requires_valid_task_type_and_risk(self):
+        for task_type, risk in (
+            (None, "low"),
+            ("implementation", None),
+            ("unknown", "low"),
+            ("implementation", "unknown"),
+        ):
+            with self.subTest(task_type=task_type, risk=risk):
+                allowed, reason = check_agent_status_gate(
+                    STATUS_REVIEW, PHASE_PLAN, task_type=task_type, risk=risk
+                )
+                self.assertFalse(allowed)
+                self.assertIn("Klassifikation", reason or "")
+
+        allowed, reason = check_agent_status_gate(
+            STATUS_REVIEW, PHASE_PLAN, task_type="research", risk="medium"
+        )
+        self.assertTrue(allowed, msg=reason)
 
     def test_status_gate_progressive_autonomy_low_risk_no_approval(self):
         # documentation + risk:low -> Gate 1 ist NICHT verpflichtend, Agent darf eigenständig
@@ -512,12 +539,14 @@ class TestWorkflowLogic(unittest.TestCase):
         self.assertIn("Gate 1", reason or "")
 
         allowed, reason = check_agent_label_gate(
-            "hermes/phase:execute", PHASE_PLAN, approval_status=None, task_type="implementation"
+            "hermes/phase:execute", PHASE_PLAN, approval_status=None,
+            task_type="implementation", risk="low",
         )
         self.assertFalse(allowed)
 
         allowed, reason = check_agent_label_gate(
-            "hermes/phase:execute", PHASE_PLAN, approval_status=APPROVAL_APPROVED, task_type="implementation"
+            "hermes/phase:execute", PHASE_PLAN, approval_status=APPROVAL_APPROVED,
+            task_type="implementation", risk="low",
         )
         self.assertTrue(allowed)
 
@@ -537,6 +566,17 @@ class TestWorkflowLogic(unittest.TestCase):
         self.assertIn("MODUS: PLAN / KONZEPTION (READ-ONLY)", prompt)
         self.assertIn("KEINE produktiven Änderungen", prompt)
         self.assertIn("HIGH RISK", prompt)
+        self.assertIn("Triage-Klassifikation ist Pflicht", prompt)
+        self.assertIn("hermes/type:<wert>", prompt)
+        self.assertIn("hermes/risk:<wert>", prompt)
+
+    def test_skill_plan_example_requires_type_and_risk_labels(self):
+        skill_path = Path(__file__).parents[1] / "skills" / "nextcloud-deck" / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+        example = skill.split("```json", 1)[1].split("```", 1)[0]
+        self.assertIn('"hermes/type:<wert>"', example)
+        self.assertIn('"hermes/risk:<wert>"', example)
+        self.assertIn('"hermes/approval:required"', example)
 
     def test_capabilities_prompt_execute_mode(self):
         prompt = build_capabilities_prompt(
@@ -581,7 +621,11 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_send_allows_valid_move_to_review(self):
         # _locate_card: 1. Aufruf (vor Move) → Quell-Stack 2; danach (Verifikation) → Ziel-Stack 3
         self.adapter._locate_card = AsyncMock(side_effect=[("7", "2"), ("7", "3")])
-        self.adapter.client.get_card = AsyncMock(return_value={"labels": [{"title": "hermes/phase:plan"}]})
+        self.adapter.client.get_card = AsyncMock(return_value={"labels": [
+            {"title": "hermes/phase:plan"},
+            {"title": "hermes/type:documentation"},
+            {"title": "hermes/risk:low"},
+        ]})
         self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
         self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
         self.adapter.client.add_comment = AsyncMock(return_value={"id": 100})
@@ -594,10 +638,66 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.adapter.client.move_card.assert_called_once_with("7", "2", "42", "3")
 
+    async def test_send_blocks_review_move_without_task_classification(self):
+        self.adapter._locate_card = AsyncMock(return_value=("7", "2"))
+        self.adapter.client.get_card = AsyncMock(return_value={"labels": [{"title": "hermes/phase:plan"}]})
+        self.adapter.client.move_card = AsyncMock()
+        self.adapter.client.add_comment = AsyncMock(return_value={"id": 101})
+
+        result = await self.adapter.send(
+            chat_id="deck:board:7:card:42",
+            content="",
+            metadata={"target_status": "review"},
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("Klassifikation", result.error or "")
+        self.adapter.client.move_card.assert_not_called()
+        self.adapter.client.add_comment.assert_called_once()
+
+    async def test_send_applies_classification_labels_before_review_move(self):
+        labels = [{"title": "hermes/phase:plan"}]
+        self.adapter._locate_card = AsyncMock(side_effect=[("7", "2"), ("7", "3")])
+        self.adapter.client.get_card = AsyncMock(return_value={"labels": labels})
+        self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
+        self.adapter._remove_label_from_card = AsyncMock(return_value=True)
+        self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
+        self.adapter.client.add_comment = AsyncMock(return_value={"id": 102})
+
+        async def apply_label(_card_id, label):
+            labels.append({"title": label})
+            return True, None
+
+        self.adapter._apply_label_to_card = AsyncMock(side_effect=apply_label)
+        result = await self.adapter.send(
+            chat_id="deck:board:7:card:42",
+            content="",
+            metadata={
+                "target_status": "review",
+                "assign_labels": [
+                    "hermes/type:documentation",
+                    "hermes/risk:low",
+                    "hermes/approval:required",
+                ],
+            },
+        )
+
+        self.assertTrue(result.success, msg=result.error)
+        self.adapter._apply_label_to_card.assert_has_awaits([
+            call("42", "hermes/type:documentation"),
+            call("42", "hermes/risk:low"),
+            call("42", "hermes/approval:required"),
+        ])
+        self.adapter.client.move_card.assert_called_once_with("7", "2", "42", "3")
+
     async def test_send_move_verification_failure_detected(self):
         """Move-Verifikation: stiller API-Fehlschlag (Karte nicht im Ziel-Stack) wird erkannt."""
         self.adapter._locate_card = AsyncMock(return_value=("7", "2"))  # bleibt immer im Quell-Stack
-        self.adapter.client.get_card = AsyncMock(return_value={"labels": [{"title": "hermes/phase:plan"}]})
+        self.adapter.client.get_card = AsyncMock(return_value={"labels": [
+            {"title": "hermes/phase:plan"},
+            {"title": "hermes/type:documentation"},
+            {"title": "hermes/risk:low"},
+        ]})
         self.adapter._resolve_target_stack_id = AsyncMock(return_value="3")
         self.adapter.client.move_card = AsyncMock(return_value={"id": 42})
         self.adapter.client.add_comment = AsyncMock(return_value={"id": 100})
@@ -623,9 +723,13 @@ class TestAdapterWorkflowIntegration(unittest.IsolatedAsyncioTestCase):
         self.adapter._locate_card = AsyncMock(
             side_effect=[("7", "1"), ("7", "1"), ("7", "3"), ("7", "3"), ("7", "3"), ("7", "3")]
         )
-        # Karte in 'todo' (Stack 1), Phase plan, low risk → Auto-Move erlaubt
+        # Karte in 'todo' (Stack 1), Phase plan, klassifiziert → Auto-Move erlaubt
         self.adapter.client.get_card = AsyncMock(return_value={
-            "labels": [{"title": "hermes/phase:plan"}, {"title": "hermes/risk:low"}]
+            "labels": [
+                {"title": "hermes/phase:plan"},
+                {"title": "hermes/type:documentation"},
+                {"title": "hermes/risk:low"},
+            ]
         })
         self.adapter.client.get_stacks = AsyncMock(return_value=[
             {"id": "1", "title": "Todo"},

@@ -16,6 +16,7 @@ Use this skill when a task explicitly concerns the Hermes Nextcloud Deck integra
   - `hermes/phase:plan`: Read-only Konzeption. Agent analysiert Logs/Systeme und verfasst Plan + Subtasks in der Description. Keine produktiven Änderungen!
   - `hermes/phase:execute`: Umsetzung nach freigegebenem Plan. Subtasks werden sequenziell abgearbeitet und evidenzbasiert mit `[x]` abgehakt.
   - `hermes/approval:required` / `hermes/approval:approved`: Menschliche Freigabe für Phase `execute`.
+- **Triage-Klassifikation:** Vor einem Wechsel aus Triage muss genau ein Aufgabenart-Label (`implementation`, `documentation`, `troubleshooting` oder `research`) und ein Risiko-Label (`low`, `medium`, `high` oder `critical`) gesetzt sein. Unbekanntes Risiko ist NICHT automatisch `low`; bei unzureichenden Angaben dokumentiere die Unsicherheit und fordere Klärung an.
 - **Workflow Gates (technische Schutzmechanismen):**
   - **Gate 1 (Plan → Execute):** Nur für `hermes/type:implementation` oder `hermes/risk:medium|high|critical` verpflichtend. Ohne `hermes/approval:approved` darf der Agent dann weder nach `Running` schieben noch selbst in Phase `execute` wechseln. Für `documentation`/`troubleshooting`/`research` mit `risk:low` (progressive Autonomy) ist die Freigabe **optional** — der Agent darf eigenständig in die Umsetzung.
   - **Gate 2 (Execute → Done):** Der Agent darf eine Karte nicht selbst nach `Done` schieben; er schiebt nach `Review`.
@@ -39,7 +40,7 @@ Status, Labels und Assignee. Die `card_id` steht im Kontext (`Karten-ID (card_id
   "card_id": "106",
   "target_status": "review",
   "description": "# Objective\n...\n## Subtasks\n- [x] 1. Analyse\n- [ ] 2. Umsetzung",
-  "assign_labels": ["hermes/approval:required"],
+  "assign_labels": ["hermes/type:<wert>", "hermes/risk:<wert>", "hermes/approval:required"],
   "remove_labels": ["hermes/phase:plan"],
   "assign_user": "marten",
   "comment": "Optionaler Kommentar, der im selben Schritt gepostet wird."
@@ -68,8 +69,9 @@ Wichtige Ablaufregeln:
   bestehenden Inhalt. Behalte die Menschen-Sektionen unverändert bei und
   ergänze/aktualisiere nur den Agent-Teil unterhalb von `# Agent Workspace`.
 - **Plan fertig:** `deck_card_action` mit `description` (Plan inkl. Subtasks),
-  `target_status: "review"` und `assign_labels: ["hermes/approval:required"]`.
-  Die Karte bleibt in `hermes/phase:plan`, bis ein Mensch freigibt.
+  `target_status: "review"` und `assign_labels` mit genau einem `hermes/type:<wert>`,
+  einem `hermes/risk:<wert>` sowie `hermes/approval:required`. Die Karte bleibt in
+  `hermes/phase:plan`, bis ein Mensch freigibt.
 - **Execute-Start (nach Freigabe):** `deck_card_action` mit
   `remove_labels: ["hermes/phase:plan"]` + `assign_labels: ["hermes/phase:execute"]`.
   So ist der Phasenwechsel auch im Deck-UI sichtbar.

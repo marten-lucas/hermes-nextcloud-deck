@@ -20,6 +20,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+try:
+    from .platform_wip import active_platform_turns, finish_platform_turn, start_platform_turn
+except ImportError:  # direct test/import
+    from platform_wip import active_platform_turns, finish_platform_turn, start_platform_turn
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,10 +41,12 @@ async def active_turn(adapter, card_id: str):
     Speed-Feature.
     """
     adapter._active_turns.add(card_id)
+    start_platform_turn("deck", card_id)
     try:
         yield
     finally:
         adapter._active_turns.discard(card_id)
+        finish_platform_turn("deck", card_id)
 
 
 def in_flight_count(adapter, exclude_card_id: Optional[str] = None) -> int:
@@ -58,13 +65,12 @@ def in_flight_count(adapter, exclude_card_id: Optional[str] = None) -> int:
 
 
 async def count_active_cards(adapter, exclude_card_id: Optional[str] = None) -> int:
-    """Zählt Karten, die TATSÄCHLICH einen Turn laufen (in-flight).
+    """Zählt aktive Deck-Turns plus laufende Turns anderer Plattformen.
 
-    Wird für das GLOBALE WIP-LIMIT genutzt. Nur Karten, deren Turn gerade
-    aktiv läuft (``_active_turns``), zählen gegen das Limit. Karten, die nur
-    in einer aktiven Spalte (todo/ready/running) liegen, aber KEINEN Turn
-    laufen, zählen NICHT — sonst blockiert eine fertige Karte in Ready das
-    WIP-Limit, obwohl sie gar nicht arbeitet.
+    Wird für das GLOBALE WIP-Limit genutzt. Deck-Karten zählen nur, wenn ihr
+    Turn tatsächlich in ``_active_turns`` läuft; aktive Talk-Turns kommen aus
+    dem prozessweiten Plattform-Register. Karten, die nur in einer aktiven
+    Spalte liegen, aber KEINEN Turn laufen, zählen NICHT.
 
     Bei ``max_in_progress=0`` (unbegrenzt) gibt es kein Limit zu prüfen —
     daher 0 (WIP-Semantik). Für die Idle-Prüfung (Auto-Resume) ist
@@ -72,7 +78,9 @@ async def count_active_cards(adapter, exclude_card_id: Optional[str] = None) -> 
     """
     if not adapter.runtime.max_in_progress:
         return 0
-    return in_flight_count(adapter, exclude_card_id)
+    deck_turns = in_flight_count(adapter, exclude_card_id)
+    external_turns = active_platform_turns(exclude_platform="deck")
+    return deck_turns + external_turns
 
 
 def card_is_triggered(adapter, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:

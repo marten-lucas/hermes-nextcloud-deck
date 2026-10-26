@@ -26,9 +26,13 @@ _DEFAULT_FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
     "approval:required": ("\u231B Freigabe n\u00F6tig", "FCF3CF"),
     "approval:approved": ("\u2714\uFE0F Freigabe erteilt", "D4EFDF"),
     "risk:low": ("\U0001F7E2 Risiko: Gering", "A9DFBF"),
+    "risk:medium": ("\U0001F7E1 Risiko: Mittel", "F9E79F"),
     "risk:high": ("\u26A0\uFE0F Risiko: Hoch", "FADBD8"),
+    "risk:critical": ("\U0001F6D1 Risiko: Kritisch", "E6B0AA"),
     "type:implementation": ("\U0001F6E0\uFE0F Umsetzungsaufgabe", "D6EAF8"),
     "type:documentation": ("\U0001F4DA Dokumentation", "D7BDE2"),
+    "type:troubleshooting": ("\U0001F9F0 Fehlersuche", "D5F5E3"),
+    "type:research": ("\U0001F50E Recherche", "E8DAEF"),
     # Status-Label "Waiting": reiner Sichtbarkeits-Indikator (kein Workflow-Gate).
     # Der Adapter setzt es, wenn eine Karte das globale WIP-Limit erreicht hat
     # und noch nicht gestartet werden kann. Wird beim tatsächlichen Start
@@ -414,9 +418,22 @@ PHASE_EXECUTE = "execute"
 APPROVAL_REQUIRED = "required"
 APPROVAL_APPROVED = "approved"
 
+# Klassifikation wird vor jedem Fortschritts-/Review-Übergang verlangt. Diese
+# Werte entsprechen den kanonischen Labels, die der Adapter tatsächlich parsen kann.
+TASK_TYPE_VALUES = frozenset({"implementation", "documentation", "troubleshooting", "research"})
+RISK_VALUES = frozenset({"low", "medium", "high", "critical"})
+
+
+def has_task_classification(task_type: Optional[str], risk: Optional[str]) -> bool:
+    return (
+        str(task_type or "").strip().lower() in TASK_TYPE_VALUES
+        and str(risk or "").strip().lower() in RISK_VALUES
+    )
+
+
 # Task-Typen, bei denen das menschliche Gate 1 (Plan -> Execute) zwingend ist.
-# Alle anderen Typen (documentation, troubleshooting, research) bzw. risk=low
-# dürfen eigenständig von plan nach execute wechseln (progressive Autonomy).
+# Alle anderen Typen mit risk=low dürfen eigenständig von plan nach execute
+# wechseln (progressive Autonomy), aber nur nach vollständiger Klassifikation.
 GATE1_MANDATORY_TYPES = {"implementation"}
 
 # Risikostufen, die Gate 1 unabhängig vom Typ verpflichtend machen.
@@ -678,8 +695,8 @@ def build_capabilities_prompt(
 ) -> str:
     """Baut den instruierenden Prompt-Block basierend auf Phase, Typ und Risiko."""
     norm_phase = (phase or PHASE_PLAN).lower()
-    norm_risk = (risk or "low").lower()
-    norm_type = (task_type or "general").lower()
+    norm_risk = (risk or "unclassified").lower()
+    norm_type = (task_type or "unclassified").lower()
 
     lines = [
         "### HERMES WORKFLOW AGENT CONTRACT",
@@ -714,9 +731,14 @@ def build_capabilities_prompt(
             "  die ##-Sektionen, OHNE den '# Agent Workspace'-Marker zu wiederholen):",
             "  * ## Subtasks: konkrete Arbeitsschritte als Checkboxen (- [ ] ...)",
             "  * ## Re-Briefing: ob alles wie gewünscht umsetzbar ist oder was nicht (Klärungsbedarf/Risiken)",
+            "- **Triage-Klassifikation ist Pflicht:** Leite aus der menschlichen Beschreibung genau eine",
+            f"  Aufgabenart ({', '.join(sorted(TASK_TYPE_VALUES))}) und eine Risikostufe",
+            f"  ({', '.join(sorted(RISK_VALUES))}) ab. Setze beide Labels im selben `deck_card_action`-Aufruf.",
+            "  Fehlen entscheidende Informationen, wähle nicht stillschweigend `low`; beschreibe die",
+            "  Unsicherheit im Re-Briefing und fordere die nötige Klärung in `review` an.",
             "- Wenn der Plan fertig ist:",
             "  * Verschiebe die Karte nach 'review'",
-            f"  * Setze Label '{lbl_approval}' (oder fordere Freigabe per Kommentar)",
+            f"  * Setze '{lbl_approval}' sowie genau ein `hermes/type:<wert>`- und ein `hermes/risk:<wert>`-Label",
             "  * Wechsle NICHT selbst nach 'execute' — warte auf die menschliche Freigabe!",
             "",
             "📌 **VERPFLICHTEND:** Wenn du den Agent-Workspace aktualisierst, MUSS derselbe",
@@ -724,7 +746,7 @@ def build_capabilities_prompt(
             "Beschreibungs-Update OHNE target_status ist ein Vertragsbruch — die Karte",
             "bleibt sonst in ihrer Spalte liegen. Rufe das Tool EINMAL mit allem auf:",
             "  {\"card_id\": ..., \"description\": \"## Subtasks\\n- [ ] 1. ...\\n\\n## Re-Briefing\\n...\", \"target_status\": \"review\",",
-            f"   \"assign_labels\": [\"{lbl_approval}\"]}}",
+            f"   \"assign_labels\": [\"hermes/type:<wert>\", \"hermes/risk:<wert>\", \"{lbl_approval}\"]}}",
         ])
     else:  # EXECUTE
         lbl_approval = friendly_label_title("approval:required")
@@ -806,6 +828,18 @@ def check_agent_status_gate(
     if status_norm in {STATUS_BACKLOG, "ideen"}:
         return False, "Karten können vom Agenten nicht ins Backlog verschoben werden."
 
+    forward_statuses = {
+        STATUS_TODO, STATUS_READY, STATUS_RUNNING, STATUS_REVIEW,
+        "to do", "in_progress", "umsetzung", "in arbeit",
+    }
+    if status_norm in forward_statuses and not has_task_classification(task_type, risk):
+        missing = []
+        if str(task_type or "").strip().lower() not in TASK_TYPE_VALUES:
+            missing.append("hermes/type:<implementation|documentation|troubleshooting|research>")
+        if str(risk or "").strip().lower() not in RISK_VALUES:
+            missing.append("hermes/risk:<low|medium|high|critical>")
+        return False, "Triage-Klassifikation fehlt: setze " + " und ".join(missing) + " vor dem Statuswechsel."
+
     # Gate 1: Aus der Plan-Phase direkt nach Running/Execute ohne Approval —
     # nur, wenn Gate 1 für diesen Typ/diese Risikostufe verpflichtend ist.
     if (
@@ -841,6 +875,10 @@ def check_agent_label_gate(
             f"Gate 1 verletzt: Der Agent darf '{friendly_label_title('approval:approved')}' "
             "(approval:approved) nicht selbst setzen."
         )
+
+    # Eine Phase-Execute-Zuweisung setzt eine vollständige Triage-Klassifikation voraus.
+    if key == f"phase:{PHASE_EXECUTE}" and not has_task_classification(task_type, risk):
+        return False, "Triage-Klassifikation fehlt: Aufgabenart und Risiko müssen vor Execute gesetzt sein."
 
     # Agent darf nicht eigenmächtig von plan nach execute wechseln, wenn nicht approved
     if (

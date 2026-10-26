@@ -26,6 +26,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
+    from .platform_wip import active_platform_turns
     from .state import DeckCardSnapshot
     from .wip import card_is_triggered, in_flight_count
     from .workflow import (
@@ -35,6 +36,7 @@ try:
         workflow_label_keys,
     )
 except ImportError:  # direct test/import
+    from platform_wip import active_platform_turns
     from state import DeckCardSnapshot
     from wip import card_is_triggered, in_flight_count
     from workflow import (
@@ -212,9 +214,8 @@ async def polling_loop(adapter) -> None:
 # Verhindert, dass das System nach Gateway-Restart und während Leerlauf
 # idle wartet, obwohl Arbeit fertig liegt:
 #
-#   - NUR wenn aktuell KEIN Turn läuft (``in_flight_count == 0``) —
-#     laufende Turns werden nicht parallel überholt (wichtig: unabhängig
-#     vom WIP-Limit, auch bei ``max_in_progress=0``).
+#   - NUR wenn aktuell KEIN Deck- oder Talk-Turn läuft — laufende Turns werden
+#     nicht parallel überholt (unabhängig vom WIP-Limit, auch bei max=0).
 #   - Kandidaten Priorität 1 (active_work): Karten in aktiven Spalten
 #     (Todo/Ready/Running/…), die dem Bot zugewiesen sind und keinen
 #     frischen Trigger mehr tragen — typisch: unterbrochene Turns nach
@@ -327,7 +328,7 @@ async def auto_resume_pass(adapter) -> int:
     """
     if not adapter.runtime.auto_resume:
         return 0
-    active = in_flight_count(adapter)
+    active = in_flight_count(adapter) + active_platform_turns(exclude_platform="deck")
     if active > 0:
         return 0  # läuft bereits — nichts überholen
 

@@ -32,6 +32,7 @@ from ingestion import (  # noqa: E402
     auto_resume_pass,
     find_resume_candidates,
 )
+from platform_wip import finish_platform_turn, start_platform_turn  # noqa: E402
 from state import DeckStateManager  # noqa: E402
 
 
@@ -254,12 +255,24 @@ class TestAutoResumePass(unittest.IsolatedAsyncioTestCase):
 
     async def test_skips_when_turn_already_running(self):
         adapter = _make_adapter()
-        adapter._active_turns.add("999")  # ein anderer Turn läuft
+        adapter._active_turns.add("999")  # ein anderer Deck-Turn läuft
         stacks = [_stack("10", "Running", [_card("100")])]
         _wire_client(adapter, {"1": stacks})
         adapter._process_card = AsyncMock()
         self.assertEqual(await auto_resume_pass(adapter), 0)
         adapter._process_card.assert_not_awaited()
+
+    async def test_skips_when_talk_turn_is_running(self):
+        adapter = _make_adapter({"max_in_progress": 1})
+        stacks = [_stack("10", "Triage", [_card("100")])]
+        _wire_client(adapter, {"1": stacks})
+        adapter._process_card = AsyncMock()
+        start_platform_turn("talk", "room-auto-resume-test")
+        try:
+            self.assertEqual(await auto_resume_pass(adapter), 0)
+            adapter._process_card.assert_not_awaited()
+        finally:
+            finish_platform_turn("talk", "room-auto-resume-test")
 
     async def test_disabled_feature_starts_nothing(self):
         adapter = _make_adapter({"auto_resume": False})

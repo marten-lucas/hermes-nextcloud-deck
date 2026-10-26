@@ -12,7 +12,8 @@ for _mod in (
     if _mod in sys.modules:
         del sys.modules[_mod]
 
-from adapter import NextcloudDeckPlatform
+from adapter import NextcloudDeckPlatform  # noqa: E402
+from platform_wip import finish_platform_turn, start_platform_turn  # noqa: E402
 
 
 def _make_adapter() -> NextcloudDeckPlatform:
@@ -78,6 +79,17 @@ class TestCountActiveCards(unittest.IsolatedAsyncioTestCase):
         adapter.runtime.max_in_progress = 2
         adapter._active_turns = {"a", "b", "c"}
         self.assertEqual(await adapter._count_active_cards(exclude_card_id="b"), 2)
+
+    async def test_talk_turn_counts_against_deck_wip_limit(self):
+        adapter = _make_adapter()
+        adapter.runtime.max_in_progress = 1
+        adapter._active_turns.clear()
+        start_platform_turn("talk", "room-123")
+        try:
+            self.assertEqual(await adapter._count_active_cards(), 1)
+        finally:
+            finish_platform_turn("talk", "room-123")
+        self.assertEqual(await adapter._count_active_cards(), 0)
 
     async def test_returns_zero_when_limit_disabled(self):
         # max_in_progress == 0 (Default) => WIP-Limit deaktiviert => immer 0.

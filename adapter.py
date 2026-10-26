@@ -31,6 +31,7 @@ try:
         DestructiveToolBlocked,
         analyze_board_suitability,
         build_capabilities_prompt,
+        canonical_label_key,
         check_agent_status_gate,
         check_destructive_gate,
         compile_destructive_patterns,
@@ -64,6 +65,7 @@ except ImportError:  # direct test/import
         DestructiveToolBlocked,
         analyze_board_suitability,
         build_capabilities_prompt,
+        canonical_label_key,
         check_agent_status_gate,
         check_destructive_gate,
         compile_destructive_patterns,
@@ -968,13 +970,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         unassign_user = metadata.get("unassign_user") or metadata.get("unassign_users")
 
         card_action_taken = False
+        labels_to_assign = [assign_labels] if isinstance(assign_labels, str) else list(assign_labels or [])
+        labels_to_remove = [remove_labels] if isinstance(remove_labels, str) else list(remove_labels or [])
 
-        # Deterministische Workflow-Durchsetzung (b): Schreibt der Agent eine
-        # neue Beschreibung (Plan/Ergebnis), OHNE target_status anzugeben, wird
-        # die Karte automatisch nach 'review' verschoben. Begründung: Der
-        # Agent vergisst erfahrungsgemäß target_status im selben Call — der
-        # Adapter erzwingt damit den Vertrags-Übergang (Plan fertig → Review)
-        # zuverlässig, ohne auf das LLM-Verhalten zu vertrauen.
+        # Klassifikations-Labels müssen vor dem Move gespeichert und vom Gate
+        # erneut aus der Karte gelesen werden. So kann der LLM-Call Labels und
+        # target_status atomar im selben Adapter-Aufruf anfordern, ohne dass ein
+        # fehlgeschlagener Label-Write trotzdem einen Review-Move erlaubt.
+        if labels_to_assign:
+            for lbl in labels_to_assign:
+                applied, err = await self._apply_label_to_card(card_id, str(lbl))
+                if not applied and err:
+                    logger.warning("Deck: Label '%s' konnte nicht gesetzt werden: %s", lbl, err)
+                elif applied:
+                    card_action_taken = True
+
+        # Deterministische Workflow-Durchsetzung: eine neue Beschreibung ohne
+        # explizites Ziel löst nur dann einen Auto-Move nach Review aus, wenn das
+        # Status-Gate (inklusive Typ- und Risiko-Klassifikation) ihn erlaubt.
         auto_move_reason = None
         if new_description and not target_status:
             auto_move_reason = await self._auto_move_review_check(card_id)
@@ -982,10 +995,24 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 target_status = STATUS_REVIEW
 
         if target_status:
+            status_norm = str(target_status).strip().lower()
+            forward_statuses = {
+                "todo", "to do", "ready", "running", "in progress", "in_progress",
+                "in arbeit", "umsetzung", "review",
+            }
+            if status_norm in forward_statuses and any(
+                (canonical_label_key(str(lbl)) or "").partition(":")[0] in {"type", "risk"}
+                for lbl in labels_to_remove
+            ):
+                return SendResult(
+                    success=False,
+                    error="Workflow-Gate: Aufgabenart- und Risikolabels dürfen bei einem Fortschrittswechsel nicht entfernt werden.",
+                )
+
             moved, err = await self._move_card_to_status(card_id, str(target_status))
             if not moved:
                 # Bei einem Gate-Fehler posten wir den Grund als Kommentar, damit der Agent/User weiß, was passiert ist
-                if err and "Gate" in err:
+                if err and ("Gate" in err or "Klassifikation" in err):
                     try:
                         await self.client.add_comment(card_id, f"⚠️ **Workflow-Gate:** {err}")
                     except Exception:
@@ -1006,18 +1033,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 return SendResult(success=False, error=f"Could not update description of card {card_id}")
             card_action_taken = True
 
-        if assign_labels:
-            labels_list = [assign_labels] if isinstance(assign_labels, str) else list(assign_labels)
-            for lbl in labels_list:
-                applied, err = await self._apply_label_to_card(card_id, str(lbl))
-                if not applied and err:
-                    logger.warning("Deck: Label '%s' konnte nicht gesetzt werden: %s", lbl, err)
-                elif applied:
-                    card_action_taken = True
-
-        if remove_labels:
-            labels_list = [remove_labels] if isinstance(remove_labels, str) else list(remove_labels)
-            for lbl in labels_list:
+        if labels_to_remove:
+            for lbl in labels_to_remove:
                 removed = await self._remove_label_from_card(card_id, str(lbl))
                 if removed:
                     card_action_taken = True
