@@ -19,7 +19,6 @@ try:
     from .state import DeckCardSnapshot, DeckStateManager
     from .workflow import (
         APPROVAL_APPROVED,
-        DeckActionCounter,
         APPROVAL_REQUIRED,
         DEFAULT_TEMPLATE_LANGUAGE,
         LABEL_PREFIX_PHASE,
@@ -54,7 +53,6 @@ except ImportError:  # direct test/import
     from state import DeckCardSnapshot, DeckStateManager
     from workflow import (
         APPROVAL_APPROVED,
-        DeckActionCounter,
         APPROVAL_REQUIRED,
         DEFAULT_TEMPLATE_LANGUAGE,
         LABEL_PREFIX_PHASE,
@@ -119,21 +117,6 @@ try:
         review_approval_pass,
     )
     from .wip import active_turn, card_is_triggered, count_active_cards
-    from .platform_wip import (
-        acquire_platform_turn,
-        active_platform_connections,
-        active_presence_status,
-        active_presence_turns,
-        configure_platform_turn_limit,
-        finish_platform_turn,
-        presence_scope,
-        register_platform_connection,
-        register_presence_turn,
-        set_presence_turn_status,
-        try_acquire_platform_turn,
-        unregister_platform_connection,
-        unregister_presence_turn,
-    )
 except ImportError:  # direct test/import
     from execution import (
         apply_label_to_card,
@@ -171,21 +154,6 @@ except ImportError:  # direct test/import
         review_approval_pass,
     )
     from wip import active_turn, card_is_triggered, count_active_cards
-    from platform_wip import (
-        acquire_platform_turn,
-        active_platform_connections,
-        active_presence_status,
-        active_presence_turns,
-        configure_platform_turn_limit,
-        finish_platform_turn,
-        presence_scope,
-        register_platform_connection,
-        register_presence_turn,
-        set_presence_turn_status,
-        try_acquire_platform_turn,
-        unregister_platform_connection,
-        unregister_presence_turn,
-    )
 
 try:
     from gateway.config import Platform, PlatformConfig  # type: ignore
@@ -622,10 +590,6 @@ def _build_runtime_config(config: Any) -> DeckRuntimeConfig:
 class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralTypeIssues]  # bedingte Definition (Gateway vs. Fallback)
     """Polling platform adapter for explicitly configured Nextcloud Deck boards."""
 
-    # Deck cards are task queues, not interactive chats. A restart-resumed turn
-    # must continue the interrupted work rather than ask a user what to do next.
-    interactive_resume = False
-
     @staticmethod
     def _resolve_platform():
         """Platform-Member robust auflösen (auch ohne Plugin-Discovery).
@@ -651,8 +615,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         global _LIVE_ADAPTER_REF
         _LIVE_ADAPTER_REF = self
         self.runtime = _build_runtime_config(config)
-        self._presence_scope_key = presence_scope(self.runtime.base_url, self.runtime.username)
-        configure_platform_turn_limit(self.runtime.max_in_progress)
         # ARCH-003: Friendly-Label-Mapping HIER (Live-Pfad / Konstruktor) anwenden,
         # NICHT in der Config-Validierung. So bleibt validate_deck_config /
         # check_is_connected rein (keine globale Seitewirkung auf
@@ -691,12 +653,9 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         # Karten hinweg). Wichtig: UNABHÄNGIG vom Speed-Feature (FUNC-002),
         # da send_typing bei speed_enabled=False early-returnt.
         self._active_turns: set[str] = set()
-        self._deck_turns: Dict[str, Dict[str, Any]] = {}
-        self._deck_event_tokens: Dict[int, str] = {}
         self._stop_event = asyncio.Event()
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._connected = False
-        self._connection_token = str(id(self))
         self._gateway_loop = None
 
     @property
@@ -723,15 +682,15 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             self._gateway_loop = None
         await self.client.ensure_session()
         await self.client.get_boards()
-        await self._reconcile_pending_revisions()
         self._connected = True
-        register_platform_connection("deck", self._connection_token, self._presence_scope_key)
         if self._polling_task is None or self._polling_task.done():
             self._polling_task = asyncio.create_task(self._polling_loop())
-        # Resume-Marker bleiben Hermes-owned und werden nicht anhand eines
-        # best-effort Deck-Scans gelöscht. Restart-resumes passieren durch die
-        # Processing-Hooks und erhalten dieselbe globale WIP-Admission wie neue
-        # Karten und Talk-Turns.
+        # Resume-Bereinigung: Nach einem Gateway-Restart setzt Hermes markierte
+        # unterbrochene Sessions mit ihrem ursprünglichen Kontext fort (auch für Karten in End-Spalten
+        # wie Review/Blocked/Done). Das führt zu parallelen Turns, die Ollama
+        # überlasten (WIP-Verletzung). Wir löschen die resume_pending-Marker für
+        # Karten in End-Spalten/Backlog, damit diese NICHT auto-resumed werden.
+        await self._clear_resume_pending_for_terminal_cards()
         # Board-Eignung prüfen und bei Problemen laut loggen (kein Abbruch —
         # ein ungeeignetes Board darf das Gateway nicht blockieren).
         await self.check_board_suitability()
@@ -741,11 +700,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         # dauerhaft als "offline" erscheint, obwohl der Gateway läuft.
         for attempt in range(3):
             try:
-                if active_presence_turns(self._presence_scope_key) > 0:
-                    await self.presence_mgr.set_presence_status("busy", force=True)
-                else:
-                    await self.presence_mgr.set_presence_status("online", force=True)
-                    await self.presence_mgr.clear_custom_status_message(force=True)
+                await self.presence_mgr.set_presence_status("online")
                 break
             except Exception as exc:
                 if attempt < 2:
@@ -761,47 +716,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                         exc,
                     )
         return True
-
-    async def _reconcile_pending_revisions(self) -> None:
-        """Drop stale plugin-side pending markers unless Hermes still owns the session.
-
-        A pending Deck revision survives process death. If Hermes has a durable
-        interrupted session (or a live active-turn token during adapter
-        reconnect), its exact transcript remains the owner and the poll must not
-        dispatch a duplicate. Otherwise the card is re-eligible on the first poll.
-        """
-        pending_cards = self.state.pending_cards()
-        if not pending_cards:
-            return
-        store = getattr(self, "_session_store", None)
-        lookup = getattr(store, "lookup_by_session_key", None) if store is not None else None
-        runner = getattr(self, "gateway_runner", None)
-        cleared = 0
-        for board_id, card_id in pending_cards:
-            session_key = f"deck:board:{board_id}:card:{card_id}"
-            entry = None
-            if callable(lookup):
-                try:
-                    entry = lookup(session_key)
-                    if asyncio.iscoroutine(entry):
-                        entry = await entry
-                except Exception as exc:
-                    logger.warning("Deck: Resume-Status für %s konnte nicht gelesen werden: %s", session_key, exc)
-                    continue
-            active = bool(
-                getattr(entry, "resume_pending", False)
-                or getattr(entry, "active_turn_token", None)
-            )
-            if not active and runner is not None:
-                try:
-                    active = bool(runner._is_session_running(session_key))
-                except Exception:
-                    active = False
-            if not active:
-                self.state.clear_pending(board_id, card_id)
-                cleared += 1
-        if cleared:
-            logger.info("Deck: %d veraltete Pending-Revision(en) nach Start erneut freigegeben.", cleared)
 
     async def _call_on_gateway_loop(self, coro_factory):
         """Führt eine Coroutine auf dem Gateway-Loop aus (Cross-Thread-sicher).
@@ -977,29 +891,17 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
     async def disconnect(self) -> None:
         self._stop_event.set()
         self._connected = False
-        unregister_platform_connection(
-            "deck",
-            getattr(self, "_connection_token", str(id(self))),
-            getattr(self, "_presence_scope_key", ""),
-        )
         task = self._polling_task
         self._polling_task = None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        # Do not clear the account-global Talk status while another adapter
-        # remains connected or owns an active turn.
+        # Presence: offline setzen + Custom-Status löschen (best-effort).
         try:
-            if active_platform_connections(account=self._presence_scope_key) == 0 and active_presence_turns(self._presence_scope_key) == 0:
-                await self.presence_mgr.clear_custom_status_message(force=True)
-                await self.presence_mgr.set_presence_status("offline", force=True)
-            elif active_presence_turns(self._presence_scope_key) > 0:
-                await self.presence_mgr.set_presence_status("busy", force=True)
-            else:
-                await self.presence_mgr.clear_custom_status_message(force=True)
-                await self.presence_mgr.set_presence_status("online", force=True)
+            await self.presence_mgr.set_presence_status("offline")
+            await self.presence_mgr.clear_custom_status_message(force=True)
         except Exception as exc:
-            logger.debug("Deck: Presence beim Disconnect konnte nicht aktualisiert werden: %s", exc)
+            logger.debug("Deck: Presence offline setzen fehlgeschlagen: %s", exc)
         if self._speed_session and not self._speed_session.closed:
             await self._speed_session.close()
         self._speed_session = None
@@ -1320,12 +1222,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 return parts[idx + 1]
         return str(target).strip()
 
-    def _presence_token_for_card(self, card_id: str) -> Optional[str]:
-        for token, payload in reversed(tuple(self._deck_turns.items())):
-            if str(payload.get("card_id") or "") == str(card_id):
-                return token
-        return None
-
     def _configured_board(self, board_id: str) -> Optional[Dict[str, Any]]:
         if not self.runtime.boards:
             return None
@@ -1365,226 +1261,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         deren eigener Status nicht die Zählung verfälscht.
         """
         return await count_active_cards(self, exclude_card_id)
-
-    async def _resume_turn_payload(self, event: Any) -> Optional[Dict[str, Any]]:
-        """Rebuild Deck workflow context for a Hermes-owned restart resume."""
-        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
-        parts = chat_id.split(":")
-        try:
-            board_id = parts[parts.index("board") + 1]
-            card_id = parts[parts.index("card") + 1]
-        except (ValueError, IndexError):
-            return None
-        location = await self._locate_card(card_id)
-        if location is None:
-            return None
-        board_id, stack_id = location
-        stacks = await self.client.get_stacks(board_id)
-        current_stack = next(
-            (stack for stack in stacks if str(stack.get("id") or "") == str(stack_id)),
-            {"id": stack_id, "title": ""},
-        )
-        card = await self.client.get_card(board_id, stack_id, card_id)
-        if not card:
-            return None
-        comments = await self.client.get_card_comments(card_id)
-        comments = sorted(comments, key=lambda item: self._comment_id(item) or 0)
-        last = comments[-1] if comments else {}
-        labels = [
-            title for title in self._card_label_titles(card)
-            if canonical_label_key(title) != "waiting"
-        ]
-        snapshot = DeckCardSnapshot(
-            board_id=board_id,
-            stack_id=stack_id,
-            card_id=card_id,
-            title=str(card.get("title") or ""),
-            description=str(card.get("description") or ""),
-            assigned_users=self.identity.assigned_uids(card),
-            labels=labels,
-            last_comment_id=str(last.get("id")) if last.get("id") else None,
-            last_author=self._last_comment_author(last) if last else None,
-            last_comment_message=str(last.get("message") or "") if last else None,
-            due_date=str(card.get("duedate")) if card.get("duedate") else None,
-            done=card.get("done"),
-        )
-        labels_by_key = extract_hermes_labels(card)
-        prompt_comment_id = self.state.in_flight_comment_id(board_id, card_id)
-        if prompt_comment_id is None:
-            prompt_comment_id = self.state.last_processed_comment_id(board_id, card_id)
-        return {
-            "board_id": board_id,
-            "stack_id": stack_id,
-            "card_id": card_id,
-            "phase": labels_by_key.get("phase") or PHASE_PLAN,
-            "risk": labels_by_key.get("risk") or "low",
-            "approval": labels_by_key.get("approval"),
-            "input_snapshot": snapshot,
-            "prompt_comment_id": prompt_comment_id,
-            "dispatch_fingerprint": (
-                self.state.in_flight_fingerprint(board_id, card_id)
-                or self.state.pending_fingerprint(board_id, card_id)
-            ),
-            "waiting_label": not is_terminal_stack(current_stack, self._configured_board(board_id)),
-        }
-
-    async def on_processing_start(self, event: Any) -> None:
-        """Acquire global WIP at the real background-turn boundary."""
-        raw = getattr(event, "raw_message", None)
-        if not isinstance(raw, dict):
-            raw = {}
-            try:
-                event.raw_message = raw
-            except Exception:
-                return
-        payload = raw.get("_hermes_deck_turn")
-        if not isinstance(payload, dict):
-            payload = await self._resume_turn_payload(event)
-            if payload is None:
-                return
-            raw["_hermes_deck_turn"] = payload
-        card_id = str(payload.get("card_id") or "").strip()
-        if not card_id:
-            return
-        token = f"{id(event)}:{card_id}"
-        token_map = getattr(self, "_deck_event_tokens", None)
-        if token_map is None:
-            self._deck_event_tokens = token_map = {}
-        if id(event) in token_map:
-            return
-
-        if not try_acquire_platform_turn("deck", token):
-            show_waiting = bool(payload.get("waiting_label", True))
-            if show_waiting:
-                try:
-                    await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
-                except Exception as exc:
-                    logger.debug("Deck: Waiting-Label konnte nicht gesetzt werden: %s", exc)
-            try:
-                await acquire_platform_turn("deck", token)
-            except BaseException:
-                if show_waiting:
-                    try:
-                        await self._remove_label_from_card(card_id, friendly_label_title("waiting"))
-                    except Exception as exc:
-                        logger.debug("Deck: Waiting-Label bei Abbruch nicht entfernt: %s", exc)
-                raise
-            if show_waiting:
-                try:
-                    await self._remove_label_from_card(card_id, friendly_label_title("waiting"))
-                except Exception as exc:
-                    logger.debug("Deck: Waiting-Label konnte nicht entfernt werden: %s", exc)
-
-        token_map[id(event)] = token
-        payload["turn_token"] = token
-        self._deck_turns[token] = payload
-        register_presence_turn(self._presence_scope_key, "deck", token)
-        set_presence_turn_status(
-            self._presence_scope_key, "deck", token, f"Karte {card_id} · Arbeitet", "⚙️"
-        )
-        self._active_turns.add(card_id)
-        workflow_ctx = DeckWorkflowContext(
-            board_id=str(payload.get("board_id") or ""),
-            card_id=card_id,
-            phase=str(payload.get("phase") or PHASE_PLAN),
-            risk=str(payload.get("risk") or "low"),
-            approval=payload.get("approval"),
-        )
-        payload["workflow_context_token"] = current_deck_context.set(workflow_ctx)
-        action_counter = DeckActionCounter()
-        payload["action_counter"] = action_counter
-        payload["action_counter_token"] = current_deck_action_count.set(action_counter)
-        try:
-            await self.presence_mgr.set_busy()
-        except Exception as exc:
-            logger.debug("Deck: Busy-Presence beim Turn-Start fehlgeschlagen: %s", exc)
-        if self.runtime.speed_enabled:
-            stop_event = asyncio.Event()
-            payload["speed_stop"] = stop_event
-            payload["speed_task"] = asyncio.create_task(
-                self._run_speed_heartbeat(
-                    str(getattr(getattr(event, "source", None), "chat_id", "") or ""),
-                    stop_event,
-                )
-            )
-
-    async def on_processing_complete(self, event: Any, outcome: Any) -> None:
-        """Finalize the actual Gateway turn, then release its shared WIP slot."""
-        token_map = getattr(self, "_deck_event_tokens", {})
-        token = token_map.pop(id(event), None)
-        payload = self._deck_turns.pop(token, None) if token else None
-        if payload is None:
-            return
-        card_id = str(payload.get("card_id") or "")
-        outcome_value = str(getattr(outcome, "value", outcome) or "").lower()
-        is_cancelled = "cancel" in outcome_value
-        is_failure = "failure" in outcome_value or "error" in outcome_value
-        try:
-            if is_failure and not is_cancelled:
-                # Hermes' generic FAILURE outcome may mean final-message delivery
-                # failed, not that the agent task itself failed. Do not mutate the
-                # workflow or consume the revision; let the next poll retry it.
-                input_snapshot = payload.get("input_snapshot")
-                if isinstance(input_snapshot, DeckCardSnapshot):
-                    self.state.cancel_dispatch(input_snapshot)
-                logger.warning("Deck: Turn für Karte %s fehlgeschlagen; Revision bleibt erneut dispatchbar.", card_id)
-            if not is_cancelled and not is_failure and card_id:
-                board_id = str(payload.get("board_id") or "")
-                stack_id = str(payload.get("stack_id") or "")
-                if board_id and stack_id:
-                    try:
-                        await self._rebaseline_card(
-                            board_id,
-                            stack_id,
-                            card_id,
-                            comment_id_limit=payload.get("prompt_comment_id"),
-                            dispatch_fingerprint=payload.get("dispatch_fingerprint"),
-                            input_snapshot=payload.get("input_snapshot"),
-                            preserve_unexplained_changes=(
-                                getattr(payload.get("action_counter"), "value", 0) == 0
-                            ),
-                        )
-                    except Exception:
-                        logger.exception("Deck: Baseline bei Turn-Ende fehlgeschlagen für Karte %s", card_id)
-        finally:
-            stop_event = payload.get("speed_stop")
-            speed_task = payload.get("speed_task")
-            if stop_event is not None:
-                stop_event.set()
-            if speed_task is not None:
-                try:
-                    await asyncio.wait_for(speed_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    speed_task.cancel()
-            context_token = payload.get("workflow_context_token")
-            if context_token is not None:
-                try:
-                    current_deck_context.reset(context_token)
-                except (ValueError, RuntimeError):
-                    logger.debug("Deck: Workflow-Context konnte nicht im Completion-Kontext zurückgesetzt werden.")
-            action_token = payload.get("action_counter_token")
-            if action_token is not None:
-                try:
-                    current_deck_action_count.reset(action_token)
-                except (ValueError, RuntimeError):
-                    logger.debug("Deck: Action-Counter konnte nicht im Completion-Kontext zurückgesetzt werden.")
-            self._active_turns.discard(card_id)
-            finish_platform_turn("deck", token)
-            unregister_presence_turn(self._presence_scope_key, "deck", token)
-            try:
-                await self.presence_mgr.clear_busy(restore_online=False)
-                if active_presence_turns(self._presence_scope_key) > 0:
-                    await self.presence_mgr.set_presence_status("busy", force=True)
-                    status = active_presence_status(self._presence_scope_key)
-                    if status is not None:
-                        await self.presence_mgr.set_custom_status_message(status[0], status[1], force=True)
-                    else:
-                        await self.presence_mgr.clear_custom_status_message(force=True)
-                else:
-                    await self.presence_mgr.clear_custom_status_message(force=True)
-                    await self.presence_mgr.set_presence_status("online", force=True)
-            except Exception as exc:
-                logger.debug("Deck: Status beim Turn-Ende konnte nicht bereinigt werden: %s", exc)
 
     def _card_is_triggered(self, card: Dict[str, Any], comments: List[Dict[str, Any]]) -> bool:
         """Erkennt, ob eine Karte den Bot triggert (→ wip.py).
@@ -1680,10 +1356,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         #    AUSNAHME: Hat ein Mensch seit dem letzten Lauf Workflow-Labels geändert
         #    (z. B. Freigabe erteilt), wird der Filter übersprungen — die Label-
         #    Änderung ist ein echter Trigger, auch wenn der Agent zuletzt kommentierte.
-        label_titles = [
-            title for title in self._card_label_titles(card)
-            if canonical_label_key(title) != "waiting"
-        ]
+        label_titles = self._card_label_titles(card)
         snapshot = DeckCardSnapshot(
             board_id=board_id,
             stack_id=stack_id,
@@ -1705,22 +1378,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 label_titles,
             )
         )
-        last_processed_comment_id = self.state.last_processed_comment_id(board_id, card_id) or 0
-        new_human_comment = any(
-            (self._comment_id(item) or 0) > last_processed_comment_id
-            and (self._last_comment_author(item) or "").lower() not in {
-                self.runtime.username.lower(),
-                self.runtime.hermes_user_id.lower(),
-                *self.runtime.bot_aliases,
-                "system", "changelog", "sample",
-            }
-            for item in comments
-        )
-        human_input_changed = (
-            self.state.content_changed_since_baseline(snapshot)
-            or human_label_change
-            or new_human_comment
-        )
         if human_label_change:
             logger.info(
                 "Deck: Workflow-Label-Änderung auf Karte %s erkannt (%s) — Trigger trotz Agent-eigenem Kommentar.",
@@ -1735,18 +1392,12 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 or last_author == self.runtime.hermes_user_id
                 or last_author.lower() in {*self.runtime.bot_aliases, "system", "changelog", "sample"}
             )
-            and not human_input_changed
         ):
-            logger.debug("Deck: Ignoriere reine Bot-/System-Kommentarrevision auf Karte %s", card_id)
+            logger.debug("Nextcloud Deck: Ignoriere eigenen oder System-Kommentar (Author: %s)", last_author)
             return
 
         # 2. Native Nextcloud System-Message / System-Event Flags auswerten.
-        if (
-            not force_process
-            and not human_input_changed
-            and last
-            and (last.get("systemMessage") or last.get("system_message"))
-        ):
+        if not force_process and last and (last.get("systemMessage") or last.get("system_message")):
             logger.debug("Nextcloud Deck: Ignoriere native SystemMessage auf Karte %s", card_id)
             return
 
@@ -1754,7 +1405,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         last_message = str(last.get("message") or "") if last else ""
         if (
             not force_process
-            and not human_input_changed
             and (
                 "{actor}" in last_message
                 or "Das System hat" in last_message
@@ -1771,9 +1421,38 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         if not force_process and not self.state.should_process(snapshot):
             return
 
-        # Globales Model-Concurrency-Limit wird atomar im echten Gateway-
-        # Processing-Hook erworben. Hier nicht zählen/reservieren: der Poller
-        # endet nach handle_message-Handoff, lange vor dem Agenten-Turn.
+        # WIP-Limit: Ist max_in_progress > 0 und bereits so viele ANDERE Karten
+        # in Arbeits-Spalten (todo/ready/running) über ALLE Boards, wie das
+        # Limit erlaubt, wird diese Karte NICHT gestartet — der nächste
+        # Poll-Zyklus prüft erneut, sobald eine laufende Karte nach
+        # Review/Blocked/Done geschoben wurde. Die wartende Karte bekommt das
+        # Label "Waiting", damit sichtbar ist, dass der Adapter sie gesehen hat.
+        # Fix 2a: Das WIP-Limit gilt NUR für Karten, die selbst in einer aktiven
+        # Arbeits-Spalte (todo/ready/running/triage) liegen. Karten in Review/
+        # Blocked/Done warten auf den Menschen oder sind beendet — sie dürfen
+        # NICHT mit 'Waiting' belegt und NICHT gegen das WIP-Limit gesperrt
+        # werden, sonst entsteht ein endloser WIP-Spam (siehe Karte 117 in Review).
+        current_stack_title = str(stack.get("title") or "").strip().lower()
+        if (
+            self.runtime.max_in_progress > 0
+            and current_stack_title in self._ACTIVE_STACK_TITLES
+        ):
+            active = await self._count_active_cards(exclude_card_id=card_id)
+            if active >= self.runtime.max_in_progress:
+                logger.info(
+                    "Deck: WIP-Limit erreicht (%d >= %d) — Karte %s ('%s') noch nicht gestartet.",
+                    active, self.runtime.max_in_progress, card_id, snapshot.title,
+                )
+                await self._apply_label_to_card(card_id, friendly_label_title("waiting"))
+                # Fix 2b: Den Zustand als "gesehen" markieren, damit diese Karte
+                # nicht in jedem Poll-Zyklus erneut getriggert wird (sonst
+                # Dauer-Spam alle poll_interval Sekunden). WICHTIG: mark_seen
+                # (nicht mark_processed), damit die Kommentar-Baseline NICHT
+                # fortgeschrieben wird — die während des Wartens auflaufenden
+                # Kommentare müssen dem Agenten später erhalten bleiben.
+                self.state.mark_seen(snapshot)
+                return
+
         # Konzept 2 (Punkt 3): Label-Konflikte idempotent bereinigen, sobald die
         # Karte tatsächlich (re-)verarbeitet wird — bevor der Agent läuft. So
         # wird z. B. ein gleichzeitiges "phase:plan"+"phase:execute" oder
@@ -1895,8 +1574,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         # letzte). Während eine Karte wartet (Waiting/Freigabe), sammeln sich
         # mehrere menschliche Hinweise an — die bekommt der Agent jetzt ALLE.
         new_comments = self._new_comments_since_baseline(board_id, card_id, comments)
-        prompt_comment_id = self.state.last_processed_comment_id(board_id, card_id)
-        included_comment_ids: List[int] = []
         if new_comments:
             blocks = []
             for c in new_comments:
@@ -1905,29 +1582,11 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 if not msg:
                     continue
                 blocks.append(f"[{author}]: {msg}")
-                cid = self._comment_id(c)
-                if cid is not None:
-                    included_comment_ids.append(cid)
             if blocks:
                 text += "\n\nNeue Kommentare seit dem letzten Lauf:\n" + "\n\n".join(blocks)
-                if included_comment_ids:
-                    prompt_comment_id = max(included_comment_ids)
         elif last and last.get("message"):
             text += f"\n\nLetzter Kommentar von {last_author or 'unbekannt'}:\n{last['message']}"
 
-        dispatch_fingerprint = snapshot.fingerprint()
-        turn_payload = {
-            "board_id": board_id,
-            "stack_id": stack_id,
-            "card_id": card_id,
-            "phase": phase,
-            "risk": risk or "low",
-            "approval": approval,
-            "input_snapshot": snapshot,
-            "prompt_comment_id": prompt_comment_id,
-            "dispatch_fingerprint": dispatch_fingerprint,
-            "waiting_label": not is_terminal_stack(stack, board_config),
-        }
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
@@ -1937,7 +1596,6 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
                 "stack": stack,
                 "card": card,
                 "comments": comments,
-                "_hermes_deck_turn": turn_payload,
                 "hermes_workflow": {
                     "phase": phase,
                     "task_type": task_type,
@@ -1954,26 +1612,132 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             user_id=actor_id,
             user_name=actor_id,
         )
-        # Persist the in-flight revision before handing off so another poll or
-        # a gateway restart cannot dispatch the same unchanged revision twice.
-        self.state.mark_dispatched(snapshot)
-        try:
-            if principal is not None:
-                with self.identity.principal_context(principal):
+        result = None
+        run_error: Optional[str] = None
+        workflow_ctx = DeckWorkflowContext(
+            board_id=str(board_id),
+            card_id=str(card_id),
+            phase=phase,
+            risk=risk or "low",
+            approval=approval,
+        )
+        token = current_deck_context.set(workflow_ctx)
+        action_token = current_deck_action_count.set(0)
+        # Speed-Heartbeat: Das Gateway ruft send_typing nur bei Progress-Messages
+        # auf (Deck sendet keine). Wir starten einen eigenen Heartbeat, der den
+        # Live-Status (Karte · Liest Kontext/Antwortet ⚡ t/s) während des Turns
+        # setzt. Wird nach dem Turn-Ende gestoppt.
+        speed_stop = asyncio.Event()
+        speed_task: Optional[asyncio.Task] = None
+        if self.runtime.speed_enabled:
+            speed_task = asyncio.create_task(
+                self._run_speed_heartbeat(session_key, speed_stop)
+            )
+        # WIP-Tracking: Turn dieser Karte registrieren (add vor dem Agent-Run,
+        # discard am Ende). Siehe _active_turn — UNABHÄNGIG vom Speed-Feature
+        # (FUNC-002): send_typing() early-returnt bei speed_enabled=False und
+        # hätte _active_turns nie gefüllt; der Turn-Lifecycle gehört an die
+        # Stelle, wo der Turn tatsächlich startet/endet, nicht an das Speed-Feature.
+        async with self._active_turn(card_id):
+            try:
+                if principal is not None:
+                    with self.identity.principal_context(principal):
+                        result = self.handle_message(event)
+                else:
                     result = self.handle_message(event)
-            else:
-                result = self.handle_message(event)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception as exc:
-            self.state.cancel_dispatch(snapshot)
-            logger.warning("Deck: Gateway-Handoff für Karte %s fehlgeschlagen: %s", card_id, exc)
-            return
-        if getattr(event, "_gateway_accepted", True) is False:
-            self.state.cancel_dispatch(snapshot)
-            logger.debug("Deck: Gateway hat den Turn für Karte %s nicht angenommen.", card_id)
-        return
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                run_error = str(exc)
+                logger.warning(
+                    "Deck: Agent-Run für Karte %s schlug fehl: %s", card_id, exc
+                )
+            finally:
+                # Speed-Heartbeat stoppen und aufräumen. Läuft BEVOR _active_turn
+                # die Karte discardet: der inneren finally-Block endet vor dem
+                # Context-Manager-Auftritt, d. h. der Discard folgt dem Stop —
+                # dieselbe Reihenfolge wie zuvor (Karte darf nicht „leaken").
+                if speed_task is not None:
+                    speed_stop.set()
+                    try:
+                        await asyncio.wait_for(speed_task, timeout=5.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        speed_task.cancel()
+                current_deck_context.reset(token)
+                action_count = current_deck_action_count.get()
+                current_deck_action_count.reset(action_token)
 
+        # Auto-Block bei Run-Fehler: Produziert der Agent keine verwertbare
+        # strukturelle Änderung (deck_card_action) und signalisiert die Antwort
+        # einen Token-Limit-/Fehlschlag, verschiebt der ADAPTER die Karte nach
+        # 'blocked'. Sonst würde eine feststeckende Karte dauerhaft in Running
+        # hängen und das globale WIP-Limit blockieren (nächste Karte bleibt
+        # 'Waiting'). Loop-sicher: nach dem Auto-Block wird die Dedup-Baseline
+        # unten neu gesetzt → kein Selbst-Trigger.
+        #
+        # Konzept 1: Zusätzlich wird INHALTLICH registriert, wenn der Agent ein
+        # Block-Intent-Signal produziert (z. B. "🤖 BLOCKED" / "PLAN CHANGE
+        # REQUESTED" im Ergebnis oder Kommentar), ohne dass er die Karte selbst
+        # strukturell nach 'blocked' verschoben hat. Auch dann übernimmt der
+        # ADAPTER den deterministischen Block — unabhängig vom LLM-Verhalten.
+        block_intent = self._run_has_block_intent(result)
+        if run_error is not None or (
+            action_count == 0 and self._run_has_failure_signal(result)
+        ) or block_intent:
+            await self._auto_block_card(card_id)
+            return
+
+        # Fix 1 (Adapter-Fallback): Ein Execute-Turn, der OHNE strukturelle
+        # Änderung endet, aber ein "warte auf menschliche Entscheidung"-Signal
+        # trägt, wird deterministisch nach 'review' verschoben — statt ewig in
+        # 'running' zu hängen und den WIP-Slot zu blockieren (der 119-Bug).
+        if (
+            phase == PHASE_EXECUTE
+            and action_count == 0
+            and self._run_has_review_intent(result)
+        ):
+            moved, _ = await self._move_card_to_status(card_id, STATUS_REVIEW)
+            if moved:
+                logger.info(
+                    "Deck: Karte %s nach 'review' verschoben — Agent wartet auf neue menschliche Freigabe (Review-Intent erkannt).",
+                    card_id,
+                )
+            await self._rebaseline_card(board_id, stack_id, card_id)
+            return
+
+        # Fix 2 (Adapter-Fallback, Plan-Phase): Ein Plan-Lauf, der OHNE
+        # strukturelle Änderung endet (kein deck_card_action), hat den Plan
+        # nicht in die Description geschrieben. Das ist fast immer ein
+        # "Agent hat Rückfragen / konnte nicht abschließen"-Fall. Statt die
+        # Karte still in Triage/Running hängen zu lassen (und den WIP-Slot zu
+        # blockieren), wird sie nach 'review' zurückgegeben — der Mensch sieht
+        # die offenen Fragen im Kommentar und kann antworten.
+        if phase == PHASE_PLAN and action_count == 0:
+            moved, _ = await self._move_card_to_status(card_id, STATUS_REVIEW)
+            if moved:
+                logger.info(
+                    "Deck: Karte %s (Phase 'plan') ohne deck_card_action nach 'review' verschoben — Plan nicht strukturell abgeschlossen (vermutlich offene Rückfragen).",
+                    card_id,
+                )
+            await self._rebaseline_card(board_id, stack_id, card_id)
+            return
+
+        # Diagnose: Hat der Agent den Lauf ohne deck_card_action beendet, obwohl
+        # die Phase strukturelle Änderungen erwarten würde? Unsichtbares
+        # "nur Kommentar"-Muster frühzeitig sichtbar machen.
+        if action_count == 0:
+            logger.warning(
+                "Deck: Lauf für Karte %s (Phase '%s') endete ohne deck_card_action-Aufruf — "
+                "der Agent hat vermutlich nur einen Text-Kommentar geschrieben statt die Karte "
+                "strukturell zu verändern.",
+                card_id, phase,
+            )
+
+        # Nach erfolgreicher Verarbeitung die Dedup-Baseline auf den *aktuellen*
+        # Karten-Zustand setzen. Der Agent kann während handle_message selbst
+        # Labels/Description geändert haben — diese Änderungen sollen NICHT als
+        # neuer Trigger wirken, ein späterer menschenseitiger Wechsel aber schon.
+        await self._rebaseline_card(board_id, stack_id, card_id)
 
     _RUN_FAILURE_MARKERS = (
         "no visible answer",
@@ -2067,17 +1831,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         """
         await auto_block_card(self, card_id)
 
-    async def _rebaseline_card(
-        self,
-        board_id: str,
-        stack_id: str,
-        card_id: str,
-        *,
-        comment_id_limit=None,
-        dispatch_fingerprint: Optional[str] = None,
-        input_snapshot: Optional[DeckCardSnapshot] = None,
-        preserve_unexplained_changes: bool = False,
-    ) -> None:
+    async def _rebaseline_card(self, board_id: str, stack_id: str, card_id: str) -> None:
         """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu (→ ingestion.py).
 
         WICHTIG: ``stack_id`` kann nach einem Move der AEHRE Stack sein (z. B.
@@ -2085,16 +1839,7 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         aktuelle Position wird deshalb per _locate_card neu ermittelt, sonst
         entsteht eine Re-Trigger-Schleife nach einem Review-Move.
         """
-        await rebaseline_card(
-            self,
-            board_id,
-            stack_id,
-            card_id,
-            comment_id_limit=comment_id_limit,
-            dispatch_fingerprint=dispatch_fingerprint,
-            input_snapshot=input_snapshot,
-            preserve_unexplained_changes=preserve_unexplained_changes,
-        )
+        await rebaseline_card(self, board_id, stack_id, card_id)
 
     async def _review_approval_pass(self) -> int:
         """Startet neue menschliche Freigaben in Review, sofern Hermes idle ist."""
@@ -2174,12 +1919,8 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             card_label = await self._card_status_label(chat_id)
             if card_label:
                 message = f"{card_label} · {message}"
-            card_id = self._card_id_from_target(chat_id)
-            token = self._presence_token_for_card(card_id)
-            if token:
-                set_presence_turn_status(self._presence_scope_key, "deck", token, message, icon)
             try:
-                await self.presence_mgr.set_custom_status_message(message, icon, force=True)
+                await self.presence_mgr.set_custom_status_message(message, icon)
             except Exception as exc:
                 logger.debug("Deck: Custom-Status setzen fehlgeschlagen: %s", exc)
         return SendResult(success=True)
@@ -2196,13 +1937,21 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
         del metadata
         if not self.runtime.speed_enabled:
             return
-
+        # In-Flight-Tracking: Diese Karte läuft gerade aktiv. Wird in die
+        # WIP-Zählung einbezogen (siehe _count_active_cards).
+        card_id = self._card_id_from_target(str(chat_id or ""))
+        if card_id:
+            self._active_turns.add(card_id)
         speed = await self._fetch_speed()
         if not speed:
             return
         suffix = self._speed_suffix(speed)
         try:
-
+            # Presence auf "busy" setzen — das Gateway ruft mark_turn_started/
+            # finished NICHT auf, daher ist send_typing der einzige zuverlässige
+            # Lifecycle-Hook während eines Turns. Zusammen mit dem Custom-Status
+            # ergibt das die sichtbare "arbeitet gerade"-Präsenz.
+            await self.presence_mgr.set_presence_status("busy")
             # Karten-Label IMMER direkt aus chat_id auflösen (eigener Cache pro
             # Karte). Ein globaler _status_card_label würde bei parallelen oder
             # aufeinanderfolgenden Turns das Label der VORHERIGEN Karte zeigen.
@@ -2220,16 +1969,32 @@ class NextcloudDeckPlatform(BasePlatformAdapter):  # type: ignore[reportGeneralT
             # send_or_update_status-Callback ("Liest Kontext" ohne Speed) den
             # Status dauerhaft und die Prozent/Geschwindigkeit fehlen.
             message = f"{prefix} ⚡ {suffix}" if suffix else prefix
-            token = self._presence_token_for_card(self._card_id_from_target(chat_id))
-            if token:
-                set_presence_turn_status(self._presence_scope_key, "deck", token, message, icon)
-            await self.presence_mgr.set_custom_status_message(message, icon, force=True)
+            await self.presence_mgr.set_custom_status_message(message, icon)
         except Exception as exc:
             logger.debug("Deck: Speed-Typing-Update fehlgeschlagen: %s", exc)
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Deck has no native typing state; turn status is owned by processing hooks."""
-        del chat_id
+        """Turn-Ende: Live-Status (Aktion + Speed) aufräumen.
+
+        Deck hat kein Typing, aber der send_typing-Heartbeat hat einen Custom-
+        Status ("Karte N · Antwortet ⚡ …") gesetzt. Der muss beim Turn-Ende
+        entfernt werden, sonst klebt "Antwortet ⚡ 8.1 t/s" dauerhaft am User,
+        obwohl keine Karte mehr läuft. Wir setzen den User auf "online" (busy
+        war via mark_turn_started/finished referenzgezählt) und löschen den
+        Custom-Status.
+        """
+        try:
+            await self.presence_mgr.clear_custom_status_message(force=True)
+            # Zurück auf "online" — das Gateway ruft mark_turn_finished nicht
+            # auf, daher stellt stop_typing die Presence wieder auf "online".
+            await self.presence_mgr.set_presence_status("online")
+        except Exception as exc:
+            logger.debug("Deck: Custom-Status beim stop_typing löschen fehlgeschlagen: %s", exc)
+        finally:
+            # In-Flight-Tracking: Turn dieser Karte ist beendet.
+            card_id = self._card_id_from_target(str(chat_id or ""))
+            if card_id:
+                self._active_turns.discard(card_id)
 
     async def _run_speed_heartbeat(self, chat_id: str, stop_event: asyncio.Event) -> None:
         """Eigener Speed-Heartbeat während eines Turns (→ formatting.py).
@@ -2475,9 +2240,10 @@ def _destructive_tool_hook(tool_name: str = "", args: Any = None, **kwargs: Any)
     # deplumen Zähler unabhängig vom Kontext (deck_card_action kann auch ohne
     # Karten-Kontext aufgerufen werden, z. B. via Tool ohne gesetzten Context).
     if str(tool_name or "").strip() == "deck_card_action":
-        counter = current_deck_action_count.get()
-        if counter is not None:
-            counter.value += 1
+        try:
+            current_deck_action_count.set(current_deck_action_count.get() + 1)
+        except Exception:
+            pass
 
     workflow_ctx = current_deck_context.get()
     if workflow_ctx is None:

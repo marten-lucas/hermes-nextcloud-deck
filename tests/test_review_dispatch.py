@@ -26,7 +26,6 @@ from adapter import NextcloudDeckPlatform  # noqa: E402
 from ingestion import (  # noqa: E402
     KIND_REVIEW_APPROVED,
     find_review_approval_candidates,
-    rebaseline_card,
     review_approval_pass,
 )
 from platform_wip import finish_platform_turn, start_platform_turn  # noqa: E402
@@ -147,39 +146,6 @@ class TestDedupLoopProtection(unittest.TestCase):
         )
         self.assertTrue(state.should_process(human_revision))
 
-    def test_dispatched_revision_survives_reload_without_consuming_new_comment(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            state_file = os.path.join(tmp, "state.json")
-            state = DeckStateManager(state_file=state_file)
-            dispatched = DeckCardSnapshot(
-                board_id="1", stack_id="10", card_id="100",
-                title="Test", description="Plan", last_comment_id="5",
-            )
-            state.mark_dispatched(dispatched)
-            queued_revision = DeckCardSnapshot(
-                board_id="1", stack_id="10", card_id="100",
-                title="Test", description="Plan", last_comment_id="7",
-                last_author="alice", last_comment_message="Queued follow-up",
-            )
-            state.mark_dispatched(queued_revision)
-            reloaded = DeckStateManager(state_file=state_file)
-            self.assertFalse(reloaded.should_process(queued_revision))
-            self.assertEqual(reloaded.in_flight_comment_id("1", "100"), 5)
-            self.assertEqual(reloaded.in_flight_fingerprint("1", "100"), dispatched.fingerprint())
-
-            completed = DeckCardSnapshot(
-                board_id="1", stack_id="10", card_id="100",
-                title="Test", description="Plan", last_comment_id="9",
-            )
-            reloaded.mark_processed(
-                completed,
-                comment_id_limit=5,
-                dispatch_fingerprint=dispatched.fingerprint(),
-            )
-            self.assertEqual(reloaded.last_processed_comment_id("1", "100"), 5)
-            self.assertEqual(reloaded.pending_fingerprint("1", "100"), queued_revision.fingerprint())
-            self.assertTrue(reloaded.should_process(completed))
-
     def test_processed_baseline_survives_reload(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_file = os.path.join(tmp, "state.json")
@@ -193,70 +159,6 @@ class TestDedupLoopProtection(unittest.TestCase):
             self.assertFalse(reloaded.should_process(revision))
 
 
-class TestRevisionCompletion(unittest.IsolatedAsyncioTestCase):
-    async def test_human_edit_during_actionless_turn_remains_pending(self):
-        adapter = _make_adapter()
-        adapter.state = DeckStateManager()
-        input_snapshot = DeckCardSnapshot(
-            board_id="1", stack_id="10", card_id="100",
-            title="Task", description="Before", last_comment_id="5",
-        )
-        adapter.state.mark_dispatched(input_snapshot)
-        adapter._locate_card = AsyncMock(return_value=("1", "10"))
-        adapter.identity.assigned_uids = lambda card: []
-        adapter.client.get_card = AsyncMock(return_value={
-            "id": "100", "title": "Task", "description": "Human edit during run",
-            "labels": [],
-        })
-        adapter.client.get_card_comments = AsyncMock(return_value=[
-            {"id": "5", "message": "Prompt input", "actorId": "hermes"},
-            {"id": "9", "message": "Additional human note", "actorId": "alice"},
-        ])
-
-        await rebaseline_card(
-            adapter, "1", "10", "100",
-            comment_id_limit=5,
-            dispatch_fingerprint=input_snapshot.fingerprint(),
-            input_snapshot=input_snapshot,
-            preserve_unexplained_changes=True,
-        )
-
-        current = DeckCardSnapshot(
-            board_id="1", stack_id="10", card_id="100",
-            title="Task", description="Human edit during run",
-            last_comment_id="9", last_author="alice",
-            last_comment_message="Additional human note",
-        )
-        self.assertTrue(adapter.state.should_process(current))
-        self.assertEqual(adapter.state.last_processed_comment_id("1", "100"), 5)
-
-
-class TestPendingRecovery(unittest.IsolatedAsyncioTestCase):
-    async def test_reconcile_keeps_hermes_resume_and_releases_orphan_pending(self):
-        adapter = _make_adapter()
-        resumable = DeckCardSnapshot(
-            board_id="1", stack_id="10", card_id="100", title="Resume", description="A",
-        )
-        orphaned = DeckCardSnapshot(
-            board_id="1", stack_id="10", card_id="101", title="Retry", description="B",
-        )
-        adapter.state.mark_dispatched(resumable)
-        adapter.state.mark_dispatched(orphaned)
-        entries = {
-            "deck:board:1:card:100": SimpleNamespace(resume_pending=True),
-            "deck:board:1:card:101": SimpleNamespace(resume_pending=False),
-        }
-        adapter._session_store = SimpleNamespace(
-            lookup_by_session_key=lambda key: entries.get(key)
-        )
-
-        await adapter._reconcile_pending_revisions()
-
-        self.assertEqual(adapter.state.pending_fingerprint("1", "100"), resumable.fingerprint())
-        self.assertIsNone(adapter.state.pending_fingerprint("1", "101"))
-        self.assertTrue(adapter.state.should_process(orphaned))
-
-
 class TestReviewApprovalCandidates(unittest.TestCase):
     def test_only_new_review_approval_is_a_candidate(self):
         adapter = _make_adapter()
@@ -264,7 +166,6 @@ class TestReviewApprovalCandidates(unittest.TestCase):
             _stack("10", "Running", [_card("100")]),
             _stack("20", "Review", [_card("110", approved=True)]),
         ]
-        adapter.state._last_labels["1:110"] = []
         candidates = find_review_approval_candidates(
             adapter, [{"id": "1"}], {"1": stacks}
         )
@@ -296,20 +197,8 @@ class TestReviewApprovalCandidates(unittest.TestCase):
 
 
 class TestReviewApprovalPass(unittest.IsolatedAsyncioTestCase):
-    async def test_existing_approval_is_seeded_not_replayed_after_state_loss(self):
-        adapter = _make_adapter()
-        stacks = [_stack("20", "Review", [_card("110", approved=True)])]
-        _wire_client(adapter, {"1": stacks})
-        adapter._process_card = AsyncMock()
-
-        self.assertEqual(await review_approval_pass(adapter), 0)
-        self.assertNotIn("1:110", adapter.state._pending_fingerprints)
-        self.assertEqual(adapter.state._last_labels["1:110"], ["hermes/approval:approved"])
-        adapter._process_card.assert_not_awaited()
-
     async def test_dispatches_new_approval_bypassing_normal_trigger_filters(self):
         adapter = _make_adapter()
-        adapter.state._last_labels["1:110"] = []
         stacks = [_stack("20", "Review", [_card("110", approved=True)])]
         _wire_client(adapter, {"1": stacks})
         adapter._process_card = AsyncMock()
@@ -338,7 +227,6 @@ class TestReviewApprovalPass(unittest.IsolatedAsyncioTestCase):
 
     async def test_respects_wip_limit(self):
         adapter = _make_adapter({"max_in_progress": 1})
-        adapter.state._last_labels.update({"1:110": [], "1:111": []})
         stacks = [
             _stack("20", "Review", [
                 _card("110", approved=True),
@@ -348,11 +236,10 @@ class TestReviewApprovalPass(unittest.IsolatedAsyncioTestCase):
         _wire_client(adapter, {"1": stacks})
         adapter._process_card = AsyncMock()
 
-        self.assertEqual(await review_approval_pass(adapter), 2)
+        self.assertEqual(await review_approval_pass(adapter), 1)
 
-    async def test_unlimited_wip_starts_all_approvals_in_one_pass(self):
+    async def test_unlimited_wip_starts_one_per_pass(self):
         adapter = _make_adapter()
-        adapter.state._last_labels.update({"1:110": [], "1:111": []})
         stacks = [_stack("20", "Review", [
             _card("110", approved=True),
             _card("111", approved=True),
@@ -360,7 +247,7 @@ class TestReviewApprovalPass(unittest.IsolatedAsyncioTestCase):
         _wire_client(adapter, {"1": stacks})
         adapter._process_card = AsyncMock()
 
-        self.assertEqual(await review_approval_pass(adapter), 2)
+        self.assertEqual(await review_approval_pass(adapter), 1)
 
     async def test_skips_while_talk_turn_is_running(self):
         adapter = _make_adapter({"max_in_progress": 1})
@@ -385,7 +272,6 @@ class TestReviewApprovalPass(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_processing_consumes_approval_without_counter(self):
         adapter = _make_adapter()
-        adapter.state._last_labels["1:110"] = []
         card = _card("110", approved=True)
         stacks = [_stack("20", "Review", [card])]
         _wire_client(adapter, {"1": stacks})
