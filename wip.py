@@ -53,9 +53,9 @@ def in_flight_count(adapter, exclude_card_id: Optional[str] = None) -> int:
     """Anzahl der tatsächlich laufenden (in-flight) Turns — UNABHÄNGIG vom
     WIP-Limit. Im Gegensatz zu ``count_active_cards``, das bei
     ``max_in_progress=0`` (unbegrenzt) per Definition 0 liefert, zählt diese
-    Funktion ``_active_turns`` immer — sie ist die Basis der Idle-Prüfung im
-    Auto-Resume-Pass (sonst würde bei Default-Konfiguration parallel zu einem
-    laufenden Turn gestartet)."""
+    Funktion ``_active_turns`` immer — sie ist die Basis der Idle-Prüfung für
+    Review-Freigaben (sonst würde bei Default-Konfiguration parallel zu einem
+    laufenden Turn gestartet). Gateway-Restart-resume verwaltet Hermes selbst."""
     total = 0
     for cid in adapter._active_turns:
         if exclude_card_id and cid == exclude_card_id:
@@ -73,7 +73,7 @@ async def count_active_cards(adapter, exclude_card_id: Optional[str] = None) -> 
     Spalte liegen, aber KEINEN Turn laufen, zählen NICHT.
 
     Bei ``max_in_progress=0`` (unbegrenzt) gibt es kein Limit zu prüfen —
-    daher 0 (WIP-Semantik). Für die Idle-Prüfung (Auto-Resume) ist
+    daher 0 (WIP-Semantik). Für die Idle-Prüfung beim Review-Dispatch ist
     ``in_flight_count`` die richtige Basis.
     """
     if not adapter.runtime.max_in_progress:
