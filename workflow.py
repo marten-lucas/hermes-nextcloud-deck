@@ -398,7 +398,8 @@ def workflow_label_keys(label_titles: List[str]) -> Set[str]:
     keys: Set[str] = set()
     for title in label_titles or []:
         key = canonical_label_key(str(title or ""))
-        if key:
+        # Adapter-owned queue visibility is not a human workflow transition.
+        if key and key != "waiting":
             keys.add(key)
     return keys
 
@@ -550,9 +551,17 @@ current_deck_context: contextvars.ContextVar[Optional[DeckWorkflowContext]] = co
     "deck_workflow_context", default=None
 )
 
-# ContextVar: zählt deck_card_action-Aufrufe im aktuellen Turn (Diagnose).
-current_deck_action_count: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "deck_card_action_count", default=0
+@dataclass
+class DeckActionCounter:
+    """Mutable counter shared with child/tool contexts copied by asyncio."""
+
+    value: int = 0
+
+
+# ContextVar: the mutable object is deliberately shared into child contexts so
+# tool hooks can report actions back to the owning background turn.
+current_deck_action_count: contextvars.ContextVar[Optional[DeckActionCounter]] = contextvars.ContextVar(
+    "deck_card_action_count", default=None
 )
 
 
