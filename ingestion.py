@@ -98,7 +98,17 @@ def new_comments_since_baseline(
     return result
 
 
-async def rebaseline_card(adapter, board_id: str, stack_id: str, card_id: str) -> None:
+async def rebaseline_card(
+    adapter,
+    board_id: str,
+    stack_id: str,
+    card_id: str,
+    *,
+    comment_id_limit=None,
+    dispatch_fingerprint: Optional[str] = None,
+    input_snapshot: Optional[DeckCardSnapshot] = None,
+    preserve_unexplained_changes: bool = False,
+) -> None:
     """Setzt die Dedup-Baseline auf den aktuellen Karten-Zustand neu.
 
     WICHTIG: ``stack_id`` kann nach einem Move der AEHRE Stack sein (z. B. die
@@ -131,14 +141,35 @@ async def rebaseline_card(adapter, board_id: str, stack_id: str, card_id: str) -
         title=str(current.get("title") or ""),
         description=str(current.get("description") or ""),
         assigned_users=adapter.identity.assigned_uids(current),
-        labels=card_label_titles(current),
+        labels=[
+            title for title in card_label_titles(current)
+            if workflow_label_keys([title]) != {"waiting"}
+        ],
         last_comment_id=str(last.get("id")) if last.get("id") else None,
         last_author=last_comment_author(last) if last else None,
         last_comment_message=str(last.get("message") or "") if last else None,
         due_date=str(current.get("duedate")) if current.get("duedate") else None,
         done=current.get("done"),
     )
-    adapter.state.mark_processed(fresh)
+    if preserve_unexplained_changes and input_snapshot is not None:
+        changed_labels = workflow_label_keys(input_snapshot.labels) ^ workflow_label_keys(fresh.labels)
+        known_adapter_labels = {"phase:plan", "phase:execute", "approval:required"}
+        unexplained_label_change = bool(changed_labels - known_adapter_labels)
+        if input_snapshot.user_fingerprint() != fresh.user_fingerprint() or unexplained_label_change:
+            adapter.state.mark_processed(
+                input_snapshot,
+                comment_id_limit=comment_id_limit,
+                dispatch_fingerprint=dispatch_fingerprint,
+            )
+            return
+    if comment_id_limit is None and dispatch_fingerprint is None:
+        adapter.state.mark_processed(fresh)
+    else:
+        adapter.state.mark_processed(
+            fresh,
+            comment_id_limit=comment_id_limit,
+            dispatch_fingerprint=dispatch_fingerprint,
+        )
 
 
 async def poll_once(adapter) -> int:
@@ -246,9 +277,9 @@ def _new_approval_since_baseline(adapter, board_id: str, card_id: str, card: Dic
         return False
     baseline = adapter.state._last_labels.get(f"{board_id}:{card_id}")
     if baseline is None:
-        # Keine Baseline = Karte wurde nie (von uns) verarbeitet →
-        # Freigabe ist per Definition neu.
-        return True
+        # Existing approvals on first install/state recovery are not new events.
+        # Review baselines are seeded before candidate detection.
+        return False
     return _APPROVED_KEY not in workflow_label_keys(baseline)
 
 
@@ -296,9 +327,6 @@ async def review_approval_pass(adapter) -> int:
     if active > 0:
         return 0
 
-    max_in_progress = adapter.runtime.max_in_progress
-    slots = max_in_progress - active if max_in_progress > 0 else 1
-
     boards: List[Dict[str, Any]] = []
     stacks_by_board: Dict[str, List[Dict[str, Any]]] = {}
     try:
@@ -313,11 +341,34 @@ async def review_approval_pass(adapter) -> int:
         logger.debug("Deck: Review-Freigabe-Dispatch übersprungen (Boards nicht ladbar): %s", exc)
         return 0
 
+    # Seed existing Review approvals on first install or after state recovery;
+    # only a subsequent human transition to approved is dispatchable.
+    for board in boards:
+        board_id = str(board.get("id") or "").strip()
+        config = adapter._configured_board(board_id)
+        for stack in stacks_by_board.get(board_id) or []:
+            if not _is_review_stack(stack, config):
+                continue
+            for card in stack.get("cards") or []:
+                card_id = str(card.get("id") or "").strip()
+                if card_id and f"{board_id}:{card_id}" not in adapter.state._last_labels:
+                    adapter.state.mark_seen(DeckCardSnapshot(
+                        board_id=board_id,
+                        stack_id=str(stack.get("id") or ""),
+                        card_id=card_id,
+                        title=str(card.get("title") or ""),
+                        description=str(card.get("description") or ""),
+                        assigned_users=adapter.identity.assigned_uids(card),
+                        labels=[
+                            title for title in card_label_titles(card)
+                            if workflow_label_keys([title]) != {"waiting"}
+                        ],
+                        done=card.get("done"),
+                    ))
+
     candidates = find_review_approval_candidates(adapter, boards, stacks_by_board)
     started = 0
     for board, stack, card, _kind in candidates:
-        if started >= slots:
-            break
         logger.info(
             "Deck: Starte neue menschliche Freigabe für Karte %s ('%s') in Review.",
             card.get("id"), card.get("title"),
@@ -326,9 +377,7 @@ async def review_approval_pass(adapter) -> int:
             await adapter._process_card(board, stack, card, force_process=True)
             started += 1
         except Exception as exc:
-            # Kein persistenter Attempt-Counter: bis zur erfolgreichen Verarbeitung
-            # bleibt die menschliche Freigabe offen und kann beim nächsten Poll
-            # erneut versucht werden.
+            # The approval remains unconsumed after a failed Gateway handoff.
             logger.warning(
                 "Deck: Review-Freigabe für Karte %s fehlgeschlagen: %s",
                 card.get("id"), exc,

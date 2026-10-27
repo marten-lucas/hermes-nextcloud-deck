@@ -48,7 +48,7 @@ optional_env:
     prompt: "Backlog format quiet window"
     password: false
   - name: NEXTCLOUD_DECK_MAX_IN_PROGRESS
-    description: "Max concurrent cards in work (todo/ready/running); 0 = unlimited (default)"
+    description: "Max concurrent Hermes model turns across Deck and Talk in this Gateway process; 0 = unlimited (default)"
     prompt: "Work-in-progress limit"
     password: false
   - name: NEXTCLOUD_DECK_TEMPLATE_LANGUAGE

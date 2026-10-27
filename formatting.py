@@ -185,16 +185,6 @@ async def run_speed_heartbeat(adapter, chat_id: str, stop_event: asyncio.Event) 
                 pass
     except asyncio.CancelledError:
         pass
-    finally:
-        # Turn-Ende: Status aufräumen (online + Custom-Status löschen).
-        try:
-            await adapter.presence_mgr.clear_custom_status_message(force=True)
-            await adapter.presence_mgr.set_presence_status("online")
-        except Exception as exc:
-            logger.debug("Deck: Speed-Heartbeat-Cleanup fehlgeschlagen: %s", exc)
-        card_id = adapter._card_id_from_target(str(chat_id or ""))
-        if card_id:
-            adapter._active_turns.discard(card_id)
 
 
 async def fetch_speed(adapter) -> Optional[Dict[str, Any]]:

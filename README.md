@@ -125,14 +125,19 @@ disable the quiet window entirely (idle and recently-edited cards are always
 corrected). The value can also be set via the environment variable
 `NEXTCLOUD_DECK_BACKLOG_FORMAT_QUIET_SECONDS`.
 
-`max_in_progress` is optional (default `0` = unlimited). It is the
-**work-in-progress limit**: the maximum number of cards that may sit in active
-columns (`Todo`/`Ready`/`Running`) at the same time, counted **globally across
-all configured boards**. When the limit is reached, new cards in those columns
-are **not** started until a running one moves to `Review`/`Blocked`/`Done`; the
-queued card gets the `⏳ Waiting` label so it is visible that the adapter saw it
-but is busy. Set `1` to force strictly sequential execution so the model never
-multitasks across cards. Also settable via `NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
+`max_in_progress` is optional (default `0` = unlimited). It is the **global
+model-turn concurrency limit**, not a count of cards sitting in active Kanban
+columns. Admission is acquired atomically at Hermes' actual background-turn
+start, and released at turn completion/cancellation. The same process-wide
+limit applies to Deck and Nextcloud Talk turns, including gateway restart-resumes
+and newly approved Review cards. Set `1` to serialize model turns across these
+channels. Also settable via `NEXTCLOUD_DECK_MAX_IN_PROGRESS`.
+
+When a Deck turn reaches the limit, its Gateway task waits for admission and the
+card gets the `⏳ Waiting` visibility label. Waiting is not a consumed revision:
+the card and its new comments remain pending, and are not discarded by dedupe.
+The setting limits active model turns only; it does not limit how many cards
+remain in `Todo`/`Ready`/`Running` or guarantee one card per active column.
 
 `template_language` is optional (default `de`). It selects the language of the
 auto-created template card and the format scaffolds. Accepts `de` or `en`; any
@@ -161,9 +166,12 @@ comma-separated string or a list. When omitted, the built-in default list in
 `workflow.py` applies.
 
 Gateway-interrupted turns are resumed by Hermes itself from the durable
-`resume_pending` session marker. The Deck plugin does not scan assigned cards
-and start arbitrary idle work: this avoids duplicate turns and keeps restart
-recovery tied to the exact conversation that was interrupted. Its
+`resume_pending` session marker. Deck marks itself as a non-interactive resume
+surface so the resumed agent continues the interrupted card work rather than
+asking a user what to do next. Resume uses the same global WIP admission as new
+Deck and Talk turns; the plugin does not delete resume markers as a concurrency
+workaround. The Deck poll does not scan assigned cards and start arbitrary idle
+work: recovery remains tied to the exact interrupted conversation. Its
 `auto_start_approved_reviews` option (default `true`) is separate: it dispatches
 a newly added `hermes/approval:approved` label in `Review` when no turn is in
 flight. A consumed approval is recorded in the Deck state baseline and will not
@@ -214,9 +222,9 @@ While a card turn is active, the adapter reflects the bot user's activity in
 Nextcloud's user-status (Talk-style), managed by `presence.py`
 (`DeckPresenceManager`):
 
-- **Presence state** (`online` / `busy`): `set_busy()` / `clear_busy()` are
-  reference-counted across concurrent turns — the user shows `busy` while at
-  least one card turn is running and returns to `online` once the last one ends.
+- **Presence state** (`online` / `busy`): actual processing hooks own the turn
+  lifecycle. Presence remains `busy` while a Deck or Talk turn is active and is
+  restored only after the last active turn ends.
 - **Custom status message**: `set_custom_status_message()` sets a short status
   line with an icon (e.g. `✍️ Antwortet`, `🛠️ Führt Werkzeuge aus`), capped at
   140 characters; `clear_custom_status_message()` removes it.
@@ -224,8 +232,10 @@ Nextcloud's user-status (Talk-style), managed by `presence.py`
   token-generation speed (t/s) is surfaced in the status via the Ollama sidecar.
 
 These are written through the Nextcloud OCS `user_status` API
-(`apps/user_status/api/v1/user_status/...`). Because Talk and Deck never drive the
-model at the same time, the bot user's status is globally unambiguous.
+(`apps/user_status/api/v1/user_status/...`). Deck and Talk share process-wide
+turn and connection accounting so one adapter's typing/turn cleanup does not
+clear the other adapter's active status. Use the same Nextcloud account and
+Gateway process if a single shared user status is desired.
 
 ## Tests
 
@@ -296,9 +306,9 @@ All labels (including `waiting`) are configurable via `extra.label_mapping` in
 2. **Set `type` and `risk`** labels (your risk assessment — the agent does **not** guess these).
 3. **Move to `Todo`** (or `Triage`) — this is the start trigger.
 4. The agent works in `Running` (plan → optionally execute).
-   - With `max_in_progress` set (e.g. `1`), cards are processed **strictly one
-     at a time** — no model multitasking. New cards in `Todo`/`Ready`/`Running`
-     wait until the active one reaches `Review`/`Blocked`/`Done`.
+   - With `max_in_progress` set (e.g. `1`), **model turns** are serialized
+     across Deck and Talk. A Deck card may remain in an active column after its
+     turn ends; that Kanban state does not itself occupy a model-concurrency slot.
 5. When done, the agent moves the card to **`Review`** (and sets `hermes/approval:required`) — it never moves to `Done` (Gate 2).
 6. **You review** the result and move it to **`Done`**.
 

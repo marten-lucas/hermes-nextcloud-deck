@@ -24,9 +24,9 @@ class DeckPresenceManager:
         # Referenzzähler für aktive Turns — Presence busy <-> online.
         self._busy_refs: int = 0
 
-    async def set_presence_status(self, state: str) -> None:
+    async def set_presence_status(self, state: str, *, force: bool = False) -> None:
         normalized = str(state or "").strip().lower()
-        if normalized == self._current_presence_state:
+        if not force and normalized == self._current_presence_state:
             return
         await self.client.ocs_put_core(
             "apps/user_status/api/v1/user_status/status",
@@ -39,20 +39,26 @@ class DeckPresenceManager:
         self._busy_refs += 1
         await self.set_presence_status("busy")
 
-    async def clear_busy(self) -> None:
-        """Turn beendet — Referenz freigeben."""
+    async def clear_busy(self, *, restore_online: bool = True) -> None:
+        """Release one local turn reference, optionally leaving global status to the coordinator."""
         self._busy_refs = max(0, self._busy_refs - 1)
-        if self._busy_refs == 0:
+        if self._busy_refs == 0 and restore_online:
             await self.set_presence_status("online")
 
     @property
     def is_busy(self) -> bool:
         return self._busy_refs > 0
 
-    async def set_custom_status_message(self, message: str, status_icon: Optional[str] = None) -> None:
+    async def set_custom_status_message(
+        self,
+        message: str,
+        status_icon: Optional[str] = None,
+        *,
+        force: bool = False,
+    ) -> None:
         normalized_message = " ".join(str(message or "").split()).strip()
         new_state = (status_icon, normalized_message)
-        if not normalized_message or new_state == self._current_custom_status:
+        if not normalized_message or (not force and new_state == self._current_custom_status):
             return
 
         payload: Dict[str, Any] = {"message": normalized_message[:140]}
