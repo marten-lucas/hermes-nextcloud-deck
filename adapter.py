@@ -19,7 +19,6 @@ try:
     from .state import DeckCardSnapshot, DeckStateManager
     from .workflow import (
         APPROVAL_APPROVED,
-        DeckActionCounter,
         APPROVAL_REQUIRED,
         DEFAULT_TEMPLATE_LANGUAGE,
         LABEL_PREFIX_PHASE,
@@ -28,6 +27,7 @@ try:
         STATUS_REVIEW,
         STATUS_RUNNING,
         TEMPLATE_LANGUAGES,
+        DeckActionCounter,
         DeckWorkflowContext,
         DestructiveToolBlocked,
         analyze_board_suitability,
@@ -54,7 +54,6 @@ except ImportError:  # direct test/import
     from state import DeckCardSnapshot, DeckStateManager
     from workflow import (
         APPROVAL_APPROVED,
-        DeckActionCounter,
         APPROVAL_REQUIRED,
         DEFAULT_TEMPLATE_LANGUAGE,
         LABEL_PREFIX_PHASE,
@@ -63,6 +62,7 @@ except ImportError:  # direct test/import
         STATUS_REVIEW,
         STATUS_RUNNING,
         TEMPLATE_LANGUAGES,
+        DeckActionCounter,
         DeckWorkflowContext,
         DestructiveToolBlocked,
         analyze_board_suitability,
@@ -118,7 +118,6 @@ try:
         rebaseline_card,
         review_approval_pass,
     )
-    from .wip import active_turn, card_is_triggered, count_active_cards
     from .platform_wip import (
         acquire_platform_turn,
         active_platform_connections,
@@ -134,6 +133,7 @@ try:
         unregister_platform_connection,
         unregister_presence_turn,
     )
+    from .wip import active_turn, card_is_triggered, count_active_cards
 except ImportError:  # direct test/import
     from execution import (
         apply_label_to_card,
@@ -170,7 +170,6 @@ except ImportError:  # direct test/import
         rebaseline_card,
         review_approval_pass,
     )
-    from wip import active_turn, card_is_triggered, count_active_cards
     from platform_wip import (
         acquire_platform_turn,
         active_platform_connections,
@@ -186,6 +185,7 @@ except ImportError:  # direct test/import
         unregister_platform_connection,
         unregister_presence_turn,
     )
+    from wip import active_turn, card_is_triggered, count_active_cards
 
 try:
     from gateway.config import Platform, PlatformConfig  # type: ignore

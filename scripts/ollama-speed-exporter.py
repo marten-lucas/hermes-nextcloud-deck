@@ -16,15 +16,15 @@ Produces (idle):
 """
 from __future__ import annotations
 
+import asyncio
 import http.server
 import json
 import re
-import subprocess
 import threading
 import time
 from typing import Any
 
-LISTEN_HOST = "0.0.0.0"
+LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 9090
 
 # Generation: ... | task <id> | n_gen = <n>, tg = <x> t/s, tg_3s = <y> t/s
@@ -78,46 +78,54 @@ def _snapshot() -> dict:
     return state
 
 
-def _tail_journald() -> None:
-    proc = subprocess.Popen(
-        ["journalctl", "-u", "ollama", "-f", "--no-pager", "-o", "cat"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
+def _update_from_journal_line(line: str) -> None:
+    match = _PROMPT.search(line)
+    if match:
+        with _lock:
+            _state.update({
+                "phase": "prompt",
+                "task_id": int(match.group(1)),
+                "prompt_tokens": int(match.group(2)),
+                "prompt_progress": float(match.group(3)),
+                "prompt_tps": float(match.group(5)),
+                "ts": time.time(),
+            })
+        return
+    match = _GEN.search(line)
+    if match:
+        with _lock:
+            _state.update({
+                "phase": "generate",
+                "task_id": int(match.group(1)),
+                "n_gen": int(match.group(2)),
+                "tg": float(match.group(3)),
+                "tg_3s": float(match.group(4)),
+                "ts": time.time(),
+            })
+
+
+async def _tail_journald() -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "journalctl", "-u", "ollama", "-f", "--no-pager", "-o", "cat",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        if proc.stdout is None:  # defensiv; durch stdout=PIPE garantiert
-            proc.terminate()
+        if proc.stdout is None:
             return
-        for line in proc.stdout:
-            m = _PROMPT.search(line)
-            if m:
-                with _lock:
-                    _state.update({
-                        "phase": "prompt",
-                        "task_id": int(m.group(1)),
-                        "prompt_tokens": int(m.group(2)),
-                        "prompt_progress": float(m.group(3)),
-                        "prompt_tps": float(m.group(5)),
-                        "ts": time.time(),
-                    })
-                continue
-            m = _GEN.search(line)
-            if m:
-                with _lock:
-                    _state.update({
-                        "phase": "generate",
-                        "task_id": int(m.group(1)),
-                        "n_gen": int(m.group(2)),
-                        "tg": float(m.group(3)),
-                        "tg_3s": float(m.group(4)),
-                        "ts": time.time(),
-                    })
+        while raw_line := await proc.stdout.readline():
+            _update_from_journal_line(raw_line.decode("utf-8", errors="replace"))
     finally:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
+
+
+def _run_journald_tailer() -> None:
+    asyncio.run(_tail_journald())
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -138,7 +146,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    threading.Thread(target=_tail_journald, daemon=True).start()
+    threading.Thread(target=_run_journald_tailer, daemon=True).start()
     server = http.server.ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), _Handler)
     server.serve_forever()
 

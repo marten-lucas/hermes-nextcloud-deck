@@ -62,16 +62,13 @@ The integration is deliberately small and safe:
 
 ## Installation
 
-Copy or clone the plugin into your Hermes plugins directory:
-
-```bash
-git clone <repo> ~/.hermes/plugins/nextcloud-deck/
-```
-
-Set the required environment variables (`NEXTCLOUD_DECK_BASE_URL`,
-`NEXTCLOUD_DECK_USERNAME`, `NEXTCLOUD_DECK_APP_PASSWORD`) — either in
-`~/.hermes/.env` or via `hermes plugins install` prompts — and enable the
-platform in `config.yaml` (see Configuration below).
+Install the plugin from its trusted repository through the Hermes plugin
+manager or Dashboard. Review the source and security-scan report before enabling
+it. Set `NEXTCLOUD_DECK_BASE_URL`, `NEXTCLOUD_DECK_USERNAME` and
+`NEXTCLOUD_DECK_APP_PASSWORD` through Hermes' secret configuration or the
+operator-managed environment, then enable the platform in the Hermes
+configuration (see Configuration below). Do not put credentials in command-line
+arguments.
 
 After changing `python_dependencies` in this manifest, Hermes must re-admit the plugin so the managed dependency graph includes the new requirement. If the plugin was already enabled, run:
 
@@ -438,8 +435,8 @@ plugin:
 - Derived `X-On-Behalf-Of` / `X-User-Groups` headers on the session source
 - ContextVars consumed by the plugin's HTTP interceptors
 - The conversation id `deck:board:<id>:card:<id>` participates in deterministic
-  memory routing via the explicit `memory.conversation_scopes` list in
-  `~/.hermes/config.yaml` (board titles are user-owned and are NOT parsed for
+  memory routing via the explicit `memory.conversation_scopes` setting in
+  Hermes configuration (board titles are user-owned and are NOT parsed for
   memory tags). Prefix matching respects segment boundaries: `deck:board:3`
   matches `deck:board:3:card:44` but not `deck:board:30`.
 

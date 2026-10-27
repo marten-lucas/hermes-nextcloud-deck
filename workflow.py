@@ -117,10 +117,10 @@ def configure_friendly_labels(mapping_config: Any) -> None:
             title = str(entry[0]).strip()
             color = str(entry[1]).strip().lstrip("#")
         else:
-            logger.warning("Deck: Ung\u00FCltiger label_mapping-Eintrag f\u00FCr '%s' \u2014 ignoriert.", key)
+            logger.warning("Deck: Ungültiger label_mapping-Eintrag für '%s' — ignoriert.", key)
             continue
         if not title or not color:
-            logger.warning("Deck: Unvollst\u00E4ndiger label_mapping-Eintrag f\u00FCr '%s' \u2014 ignoriert.", key)
+            logger.warning("Deck: Unvollständiger label_mapping-Eintrag für '%s' — ignoriert.", key)
             continue
         new_mapping[canonical] = (title, color)
     FRIENDLY_LABELS.clear()

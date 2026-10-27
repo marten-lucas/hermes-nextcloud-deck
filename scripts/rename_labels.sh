@@ -1,62 +1,78 @@
 #!/bin/bash
-# Synchronisiert die Board-Labels mit dem Friendly-Label-Mapping aus der
-# Hermes-Config (config.yaml, platforms.deck.extra.label_mapping).
-#
-# Das Script benennt/erstellt die Board-Labels entsprechend dem Mapping.
-# Die REIHENFOLGE im Mapping bestimmt die Ablage — Deck sortiert Labels im
-# Board-UI nach ID, daher werden Labels in Mapping-Reihenfolge neu angelegt
-# (alte werden vorher gelöscht), wenn die Reihenfolge weichen soll.
-#
-# Verwendung:
-#   ./rename_labels.sh <NC_USERNAME> <NC_APP_PASSWORD>
-#   DECK_CONFIG=/pfad/zur/config.yaml ./rename_labels.sh <user> <pass>
-#
-# App-Password erstellen: Nextcloud -> Einstellungen -> Sicherheit ->
-# Geräte & Sitzungen -> "Neues App-Passwort erstellen".
+set -euo pipefail
 
-U="${1:?Usage: $0 <username> <app_password>}"
-P="${2:?Usage: $0 <username> <app_password>}"
-B=https://next.cloud.kiga-gramschatz.de
-API="$B/index.php/apps/deck/api/v1.0"
-BOARD=12
+# Create any missing labels from the configured friendly-label mapping.
+# Existing labels are preserved so cards and custom workflows are not damaged.
+# Required environment: NEXTCLOUD_DECK_BASE_URL, NEXTCLOUD_DECK_USERNAME,
+# NEXTCLOUD_DECK_APP_PASSWORD, DECK_BOARD_ID. Optional: DECK_CONFIG.
 
+: "${NEXTCLOUD_DECK_BASE_URL:?Set NEXTCLOUD_DECK_BASE_URL}"
+: "${NEXTCLOUD_DECK_USERNAME:?Set NEXTCLOUD_DECK_USERNAME}"
+: "${NEXTCLOUD_DECK_APP_PASSWORD:?Set NEXTCLOUD_DECK_APP_PASSWORD}"
+: "${DECK_BOARD_ID:?Set DECK_BOARD_ID}"
+
+BASE_URL="${NEXTCLOUD_DECK_BASE_URL%/}"
+BASE_URL="${BASE_URL%/index.php}"
+case "$BASE_URL" in
+  https://*) ;;
+  *) echo "Refusing non-HTTPS Nextcloud URL." >&2; exit 2 ;;
+esac
+API="$BASE_URL/index.php/apps/deck/api/v1.0"
 CONFIG="${DECK_CONFIG:-}"
+
+# Keep the app password out of process arguments; curl reads it from a private
+# temporary config file that is removed when this script exits.
+CURL_CONFIG="$(mktemp)"
+RESPONSE="$(mktemp)"
+umask 077
+chmod 600 "$CURL_CONFIG" "$RESPONSE"
+trap 'rm -f "$CURL_CONFIG" "$RESPONSE"' EXIT
+CREDENTIALS="${NEXTCLOUD_DECK_USERNAME}:${NEXTCLOUD_DECK_APP_PASSWORD}"
+CREDENTIALS="${CREDENTIALS//\\/\\\\}"
+CREDENTIALS="${CREDENTIALS//\"/\\\"}"
+printf 'user = "%s"\n' "$CREDENTIALS" > "$CURL_CONFIG"
+
+curl_request() {
+  curl --config "$CURL_CONFIG" --silent --show-error --fail "$@"
+}
 
 read_mapping() {
   if [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
-    python3 - "$CONFIG" << 'PYEOF'
-import sys, re
+    python3 - "$CONFIG" <<'PYEOF'
+import re
+import sys
+
 mapping = []
 key = None
-with open(sys.argv[1], encoding="utf-8") as f:
+with open(sys.argv[1], encoding="utf-8") as stream:
     in_block = False
-    for line in f:
+    for line in stream:
         stripped = line.rstrip()
         if re.match(r"^\s*label_mapping:\s*$", stripped):
             in_block = True
             continue
-        if in_block:
-            m = re.match(r"^\s+([a-z]+:[a-z]+):\s*$", stripped)
-            if m:
-                key = m.group(1)
-                continue
-            m = re.match(r'^\s+title:\s*"(.+)"\s*$', stripped)
-            if m and key:
-                mapping.append([key, m.group(1), None])
-                continue
-            m = re.match(r'^\s+color:\s*"?([0-9A-Fa-f]{6})"?\s*$', stripped)
-            if m and mapping and mapping[-1][2] is None:
-                mapping[-1][2] = m.group(1)
-                continue
-            if stripped and not stripped.startswith(" "):
-                in_block = False
+        if not in_block:
+            continue
+        match = re.match(r"^\s+([a-z]+:[a-z]+):\s*$", stripped)
+        if match:
+            key = match.group(1)
+            continue
+        match = re.match(r'^\s+title:\s*"(.+)"\s*$', stripped)
+        if match and key:
+            mapping.append([key, match.group(1), None])
+            continue
+        match = re.match(r'^\s+color:\s*"?([0-9A-Fa-f]{6})"?\s*$', stripped)
+        if match and mapping and mapping[-1][2] is None:
+            mapping[-1][2] = match.group(1)
+            continue
+        if stripped and not stripped.startswith(" "):
+            in_block = False
 for entry in mapping:
     if entry[2]:
-        print(f"{entry[0]}|{entry[1]}|{entry[2]}")
+        print("|".join(entry))
 PYEOF
   else
-    # Default-Mapping (Status -> Freigaben -> Risiko -> Typ)
-    cat << 'MAPPING'
+    cat <<'MAPPING'
 phase:plan|💡 Planung|FAD7A0
 phase:execute|🚀 In Umsetzung|AED6F1
 approval:required|⌛ Freigabe nötig|FCF3CF
@@ -69,47 +85,52 @@ MAPPING
   fi
 }
 
-echo "=== Mapping aus ${CONFIG:-Default} ==="
-MAPPING=$(read_mapping)
-echo "$MAPPING"
-echo ""
+read_labels() {
+  python3 - "$1" <<'PYEOF'
+import json
+import sys
 
-echo "=== Aktuelle Board-Labels ==="
-CURRENT=$(curl -s -u "$U:$P" "$API/boards/$BOARD" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for l in d.get('labels', []):
-    print(f\"{l['id']}|{l['title']}|{l.get('color','')}\")
-")
-echo "$CURRENT"
-echo ""
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+for label in data.get("labels", []):
+    print(f"{label['id']}|{label['title']}|{label.get('color', '')}")
+PYEOF
+}
 
-# Schritt 1: Bestehende Labels löschen (sauberer Neuaufbau in Ziel-Reihenfolge;
-# Deck sortiert Labels nach ID — nur so ist die Reihenfolge im Board garantiert).
-echo "=== Schritt 1: Bestehende Labels löschen ==="
-echo "$CURRENT" | while IFS='|' read -r id title color; do
-  [ -z "$id" ] && continue
-  curl -s -u "$U:$P" -X DELETE "$API/boards/$BOARD/labels/$id" \
-    -o /dev/null -w "Label $id ('$title') gelöscht: HTTP %{http_code}\n"
-done
+label_exists() {
+  python3 - "$1" "$2" <<'PYEOF'
+import json
+import sys
 
-# Schritt 2: Labels in Mapping-Reihenfolge neu anlegen.
-echo ""
-echo "=== Schritt 2: Labels in Mapping-Reihenfolge anlegen ==="
-echo "$MAPPING" | while IFS='|' read -r key title color; do
-  [ -z "$key" ] && continue
-  PAYLOAD=$(python3 -c "import json,sys; print(json.dumps({'title': sys.argv[1], 'color': sys.argv[2]}))" "$title" "$color")
-  curl -s -u "$U:$P" -X POST "$API/boards/$BOARD/labels" \
-    -H "Content-Type: application/json" \
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+raise SystemExit(0 if any(label.get("title") == sys.argv[2] for label in data.get("labels", [])) else 1)
+PYEOF
+}
+
+MAPPING="$(read_mapping)"
+echo "=== Mapping (${CONFIG:-defaults}) ==="
+printf '%s\n' "$MAPPING"
+echo
+echo "=== Existing board labels ==="
+curl_request -o "$RESPONSE" "$API/boards/$DECK_BOARD_ID"
+read_labels "$RESPONSE"
+echo
+echo "=== Create missing labels (existing labels are preserved) ==="
+while IFS='|' read -r key title color; do
+  [ -n "$key" ] || continue
+  if label_exists "$RESPONSE" "$title"; then
+    printf "Label '%s' already exists; leaving it unchanged.\n" "$title"
+    continue
+  fi
+  PAYLOAD="$(python3 -c "import json,sys; print(json.dumps({'title': sys.argv[1], 'color': sys.argv[2]}))" "$title" "$color")"
+  STATUS="$(curl_request -X POST "$API/boards/$DECK_BOARD_ID/labels" \
+    -H 'Content-Type: application/json' \
     -d "$PAYLOAD" \
-    -o /dev/null -w "Label '$title' ($color) angelegt: HTTP %{http_code}\n"
-done
-
-echo ""
-echo "=== Ergebnis ==="
-curl -s -u "$U:$P" "$API/boards/$BOARD" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for l in d.get('labels', []):
-    print(l['id'], '|', l['title'], '|', l.get('color'))
-"
+    -o /dev/null -w '%{http_code}')"
+  printf "Label '%s' created: HTTP %s\n" "$title" "$STATUS"
+done <<< "$MAPPING"
+echo
+echo "=== Result ==="
+curl_request -o "$RESPONSE" "$API/boards/$DECK_BOARD_ID"
+read_labels "$RESPONSE"
